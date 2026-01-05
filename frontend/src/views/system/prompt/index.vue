@@ -213,12 +213,17 @@ const search = () => {
     )
     .then((res: any) => {
       toggleRowLoading.value = true
-      fieldList.value = res.data
-      pageInfo.total = res.total_count
+      // 响应中间件包装后，res.data 是 PaginatedResponse 对象
+      fieldList.value = res.data?.items || res.data?.data || res.data || []
+      pageInfo.total = res.data?.total || res.data?.total_count || res.total || 0
       searchLoading.value = false
       nextTick(() => {
         handleToggleRowSelection()
       })
+    })
+    .catch((error: any) => {
+      console.error('Failed to load custom prompts:', error)
+      searchLoading.value = false
     })
     .finally(() => {
       searchLoading.value = false

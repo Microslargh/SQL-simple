@@ -18,7 +18,8 @@ interface UserState {
   time: number
   weight: number
   register_type: number
-  [key: string]: string | number
+  _isAdminFlag: boolean  // 使用下划线前缀避免与 getter 冲突
+  [key: string]: string | number | boolean
 }
 
 export const UserStore = defineStore('user', {
@@ -34,6 +35,7 @@ export const UserStore = defineStore('user', {
       time: 0,
       weight: 0,
       register_type: 0,
+      _isAdminFlag: false,
     }
   },
   getters: {
@@ -62,7 +64,8 @@ export const UserStore = defineStore('user', {
       return this.time
     },
     isAdmin(): boolean {
-      return this.weight === 1
+      // 优先使用后端返回的 isAdmin 字段，如果没有则使用 weight === 1 判断
+      return this._isAdminFlag !== undefined && this._isAdminFlag !== false ? this._isAdminFlag : this.weight === 1
     },
     getWeight(): number {
       return this.weight
@@ -96,13 +99,15 @@ export const UserStore = defineStore('user', {
       const res: any = await AuthApi.info()
       const res_data = res || {}
 
-      const keys = ['uid', 'account', 'name', 'oid', 'language', 'exp', 'time', 'weight', 'register_type'] as const
+      const keys = ['uid', 'account', 'name', 'oid', 'language', 'exp', 'time', 'weight', 'register_type', 'isAdmin'] as const
 
       keys.forEach((key) => {
         const dkey = key === 'uid' ? 'id' : key
         const value = res_data[dkey]
         if (key === 'exp' || key === 'time' || key === 'weight' || key === 'register_type') {
           this[key] = Number(value || 0)
+        } else if (key === 'isAdmin') {
+          this._isAdminFlag = Boolean(value)
         } else {
           this[key] = String(value)
         }

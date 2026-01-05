@@ -5,7 +5,7 @@ import { store } from '@/stores/index'
 
 import { setTitle, setCurrentColor } from '@/utils/utils'
 
-const basePath = import.meta.env.VITE_API_BASE_URL
+const basePath = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 const baseUrl = basePath + '/system/appearance/picture/'
 import { isBtnShow } from '@/utils/utils'
 import type { LinkHTMLAttributes } from 'vue'

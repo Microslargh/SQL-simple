@@ -55,7 +55,7 @@ class HttpService {
   constructor(config?: AxiosRequestConfig) {
     this.cancelTokenSource = axios.CancelToken.source()
     this.instance = axios.create({
-      baseURL: import.meta.env.VITE_API_BASE_URL,
+      baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1',
       timeout: 100000,
       headers: {
         'Content-Type': 'application/json',
@@ -315,7 +315,7 @@ class HttpService {
       }
     } */
 
-    const real_url = import.meta.env.VITE_API_BASE_URL
+    const real_url = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
     return fetch(real_url + url, {
       method: 'POST',
       headers: heads,
@@ -375,7 +375,8 @@ class HttpService {
       return Promise.resolve(document.getElementById(id) as HTMLElement)
     }
     if (url.startsWith('/')) {
-      const real_url = import.meta.env.VITE_API_BASE_URL.replace('/api/v1', '')
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
+      const real_url = baseUrl.replace('/api/v1', '')
       url = real_url + url
     }
     return new Promise<HTMLElement>((resolve, reject) => {
@@ -432,7 +433,7 @@ class HttpService {
 
 // Create singleton instance
 export const request = new HttpService({
-  baseURL: import.meta.env.VITE_API_BASE_URL,
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1',
 })
 
 export const requestF = new HttpService({

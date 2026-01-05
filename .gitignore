@@ -8,6 +8,7 @@ build/
 develop-eggs/
 dist/
 downloads/
+my_model/
 eggs/
 .eggs/
 lib/
@@ -54,7 +55,7 @@ dist/
 dist-ssr/
 build/
 *.local
-
+file_trans/
 # IDE
 .vscode/*
 !.vscode/extensions.json

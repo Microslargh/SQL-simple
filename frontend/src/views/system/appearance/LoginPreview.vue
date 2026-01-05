@@ -102,7 +102,7 @@ import { isBtnShow } from '@/utils/utils'
 import { useI18n } from 'vue-i18n'
 import { computed, ref, onMounted, nextTick } from 'vue'
 import elementResizeDetectorMaker from 'element-resize-detector'
-const basePath = import.meta.env.VITE_API_BASE_URL
+const basePath = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 const baseUrl = basePath + '/system/appearance/picture/'
 
 const { t } = useI18n()

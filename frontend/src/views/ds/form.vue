@@ -192,7 +192,7 @@ const tableListLoading = ref(false)
 const token = wsCache.get('user.token')
 const headers = ref<any>({ 'X-SQLBOT-TOKEN': `Bearer ${token}` })
 const dialogTitle = ref('')
-const getUploadURL = import.meta.env.VITE_API_BASE_URL + '/datasource/uploadExcel'
+const getUploadURL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1') + '/datasource/uploadExcel'
 const saveLoading = ref<boolean>(false)
 
 const { t } = useI18n()

@@ -15,7 +15,7 @@ const props = defineProps({
   name: propTypes.string.def(''),
 })
 const textareaVal = ref('')
-const basePath = import.meta.env.VITE_API_BASE_URL
+const basePath = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 const baseUrl = basePath + '/system/assistant/picture/'
 
 const pageLogo = computed(() => {

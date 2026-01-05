@@ -3,7 +3,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import Layout from '@/components/layout/index.vue'
 import LayoutDsl from '@/components/layout/LayoutDsl.vue'
 import SinglePage from '@/components/layout/SinglePage.vue'
-// import login from '@/views/login/index.vue'
+import login from '@/views/login/index.vue'
 import chat from '@/views/chat/index.vue'
 import Datasource from '@/views/ds/Datasource.vue'
 import DashboardEditor from '@/views/dashboard/editor/index.vue'
@@ -32,12 +32,12 @@ import { watchRouter } from './watch'
 
 const t = i18n.global.t
 export const routes = [
-  /* {
+  {
     path: '/login',
     name: 'login',
-    //component: login,
-    redirect: { path: '/403' },
-  },*/
+    component: login,
+    meta: { title: '登录', hidden: true },
+  },
   {
     path: '/home',
     name: 'home',

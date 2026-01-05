@@ -63,7 +63,7 @@ const popoverRef = ref()
 const onClickOutside = () => {
   unref(popoverRef).popperRef?.delayHide?.()
 }
-const basePath = import.meta.env.VITE_API_BASE_URL
+const basePath = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 const baseUrl = basePath + '/system/assistant/picture/'
 const pageLogo = computed(() => {
   return props.logo.startsWith('blob') ? props.logo : baseUrl + props.logo

@@ -38,7 +38,7 @@ const customSet = reactive({
   header_font_color: '#1F2329',
 }) as { [key: string]: any }
 const logo = ref()
-const basePath = import.meta.env.VITE_API_BASE_URL
+const basePath = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 const baseUrl = basePath + '/system/assistant/picture/'
 const validator = ref({
   id: '',

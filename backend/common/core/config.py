@@ -24,7 +24,7 @@ def parse_cors(v: Any) -> list[str] | str:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         # Use top level .env file (one level above ./backend/)
-        env_file="../data/file/config/.env",
+        env_file=r"E:/cursor/data/sqlbot/file/config/.env",
         env_ignore_empty=True,
         extra="ignore",
     )
@@ -49,12 +49,12 @@ class Settings(BaseSettings):
     POSTGRES_SERVER: str = 'localhost'
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = 'root'
-    POSTGRES_PASSWORD: str = Field(description="PostgreSQL密码")
+    POSTGRES_PASSWORD: str = Field(default="Password123@pg", description="PostgreSQL密码")
     POSTGRES_DB: str = "sqlbot"
     SQLBOT_DB_URL: str = ''
 
     TOKEN_KEY: str = "X-SQLBOT-TOKEN"
-    DEFAULT_PWD: str = Field(description="默认密码")
+    DEFAULT_PWD: str = Field(default="123456", description="默认密码")
     ASSISTANT_TOKEN_KEY: str = "X-SQLBOT-ASSISTANT-TOKEN"
 
     CACHE_TYPE: Literal["redis", "memory", "None"] = "memory"
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     PG_MAX_OVERFLOW: int = 30
     PG_POOL_RECYCLE: int = 3600
     PG_POOL_PRE_PING: bool = True
-    USER_DEFAULT_PWD: str = Field(description="用户默认密码")
+    USER_DEFAULT_PWD: str = Field(default="!exi87223@QQX", description="用户默认密码")
 
     # 钉钉登录配置
     DINGTALK_ENABLED: bool = True  # 是否启用钉钉登录（默认禁用）

@@ -57,10 +57,43 @@ export const watchRouter = (router: Router) => {
       next('/login')
       return
     }
-    if (!userStore.getUid) {
-      await userStore.info()
+    // 确保用户信息已加载（无论是否有 uid，都重新加载一次以确保权限信息是最新的）
+    if (!userStore.getUid || userStore.getWeight === undefined || userStore.getWeight === 0) {
+      try {
+        await userStore.info()
+      } catch (error) {
+        console.error('Failed to load user info:', error)
+        // 如果加载失败，跳转到登录页
+        next('/login')
+        return
+      }
     }
-    if (to.path === '/' || accessCrossPermission(to)) {
+    
+    // 调试信息：检查用户权限状态
+    if (to.path.startsWith('/system')) {
+      console.log('Accessing system route:', to.path)
+      console.log('User info:', {
+        uid: userStore.getUid,
+        weight: userStore.getWeight,
+        isAdmin: userStore.isAdmin,
+        isSpaceAdmin: userStore.isSpaceAdmin
+      })
+    }
+    
+    // 检查权限：如果没有权限访问系统管理，跳转到 403 页面
+    if (accessCrossPermission(to)) {
+      console.warn('Access denied: User does not have permission to access', to.path, {
+        isAdmin: userStore.isAdmin,
+        isSpaceAdmin: userStore.isSpaceAdmin,
+        weight: userStore.getWeight,
+        uid: userStore.getUid
+      })
+      next('/403')
+      return
+    }
+    
+    // 访问首页时跳转到聊天页面
+    if (to.path === '/') {
       next('/chat')
       return
     }
@@ -88,7 +121,7 @@ const loadXpackStatic = () => {
   return new Promise((resolve, reject) => {
     request
       .loadRemoteScript(url, 'sqlbot_xpack_static', () => {
-        LicenseGenerator?.init(import.meta.env.VITE_API_BASE_URL).then(() => {
+        LicenseGenerator?.init(import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1').then(() => {
           resolve(true)
         })
       })

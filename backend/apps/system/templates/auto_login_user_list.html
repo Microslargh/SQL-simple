@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>选择用户登录</title>
+    <script>
+
+
+!function(a,b){"function"==typeof define&&define.amd?define(b):"object"==typeof exports?module.exports=b():a.WebStorageCache=b()}(this,function(){"use strict";function a(a,b){for(var c in b)a[c]=b[c];return a}function b(a){var b=!1;if(a&&a.setItem){b=!0;var c="__"+Math.round(1e7*Math.random());try{a.setItem(c,c),a.removeItem(c)}catch(d){b=!1}}return b}function c(a){var b=typeof a;return"string"===b&&window[a]instanceof Storage?window[a]:a}function d(a){return"[object Date]"===Object.prototype.toString.call(a)&&!isNaN(a.getTime())}function e(a,b){if(b=b||new Date,"number"==typeof a?a=a===1/0?l:new Date(b.getTime()+1e3*a):"string"==typeof a&&(a=new Date(a)),a&&!d(a))throw new Error("`expires` parameter cannot be converted to a valid Date instance");return a}function f(a){var b=!1;if(a)if(a.code)switch(a.code){case 22:b=!0;break;case 1014:"NS_ERROR_DOM_QUOTA_REACHED"===a.name&&(b=!0)}else-2147024882===a.number&&(b=!0);return b}function g(a,b){this.c=(new Date).getTime(),b=b||m;var c=e(b);this.e=c.getTime(),this.v=a}function h(a){return"object"!=typeof a?!1:a&&"c"in a&&"e"in a&&"v"in a?!0:!1}function i(a){var b=(new Date).getTime();return b<a.e}function j(a){return"string"!=typeof a&&(console.warn(a+" used as a key, but it is not a string."),a=String(a)),a}function k(e){var f={storage:"localStorage",exp:1/0},g=a(f,e),h=g.exp;if(h&&"number"!=typeof h&&!d(h))throw new Error("Constructor `exp` parameter cannot be converted to a valid Date instance");m=h;var i=c(g.storage),j=b(i);this.isSupported=function(){return j},j?(this.storage=i,this.quotaExceedHandler=function(a,b,c){if(console.warn("Quota exceeded!"),c&&c.force===!0){var d=this.deleteAllExpires();console.warn("delete all expires CacheItem : ["+d+"] and try execute `set` method again!");try{c.force=!1,this.set(a,b,c)}catch(e){console.warn(e)}}}):a(this,o)}var l=new Date("Fri, 31 Dec 9999 23:59:59 UTC"),m=l,n={serialize:function(a){return JSON.stringify(a)},deserialize:function(a){return a&&JSON.parse(a)}},o={set:function(){},get:function(){},"delete":function(){},deleteAllExpires:function(){},clear:function(){},add:function(){},replace:function(){},touch:function(){}},p={set:function(b,c,d){if(b=j(b),"number"==typeof d&&(d={exp:d}),d=a({force:!0},d),void 0===c)return this["delete"](b);var e=n.serialize(c),h=new g(e,d.exp);try{this.storage.setItem(b,n.serialize(h))}catch(i){f(i)?this.quotaExceedHandler(b,e,d,i):console.error(i)}return c},get:function(a){a=j(a);var b=null;try{b=n.deserialize(this.storage.getItem(a))}catch(c){return null}if(h(b)){if(i(b)){var d=b.v;return n.deserialize(d)}this["delete"](a)}return null},"delete":function(a){return a=j(a),this.storage.removeItem(a),a},deleteAllExpires:function(){for(var a=this.storage.length,b=[],c=this,d=0;a>d;d++){var e=this.storage.key(d),f=null;try{f=n.deserialize(this.storage.getItem(e))}catch(g){}if(null!==f&&void 0!==f.e){var h=(new Date).getTime();h>=f.e&&b.push(e)}}return b.forEach(function(a){c["delete"](a)}),b},clear:function(){this.storage.clear()},add:function(b,c,d){b=j(b),"number"==typeof d&&(d={exp:d}),d=a({force:!0},d);try{var e=n.deserialize(this.storage.getItem(b));if(!h(e)||!i(e))return this.set(b,c,d),!0}catch(f){return this.set(b,c,d),!0}return!1},replace:function(a,b,c){a=j(a);var d=null;try{d=n.deserialize(this.storage.getItem(a))}catch(e){return!1}if(h(d)){if(i(d))return this.set(a,b,c),!0;this["delete"](a)}return!1},touch:function(a,b){a=j(a);var c=null;try{c=n.deserialize(this.storage.getItem(a))}catch(d){return!1}if(h(c)){if(i(c))return this.set(a,this.get(a),{exp:b}),!0;this["delete"](a)}return!1}};return k.prototype=p,k});
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .header h2 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 28px;
+        }
+        .header p {
+            margin: 0;
+            color: #666;
+            font-size: 14px;
+        }
+        .user-list {
+            display: grid;
+            gap: 16px;
+        }
+        .user-card {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .user-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border-color: #667eea;
+        }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .user-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: #667eea;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .user-details {
+            flex: 1;
+            min-width: 0;
+        }
+        .user-name {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+        }
+        .user-account {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 2px;
+        }
+        .user-email {
+            font-size: 12px;
+            color: #999;
+        }
+        .login-icon {
+            flex-shrink: 0;
+            color: #667eea;
+            font-size: 20px;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px 0;
+            color: #999;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px 0;
+            color: #667eea;
+        }
+        .message {
+            padding: 12px 20px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .message.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>选择用户登录</h2>
+            <p>请选择要登录的用户账号</p>
+        </div>
+        <div id="message" class="message"></div>
+        <div class="user-list" id="userList">
+            {{users_html}}
+        </div>
+    </div>
+    <script>
+        // 等待页面加载完成
+        window.addEventListener('DOMContentLoaded', function() {
+            // 初始化 WebStorageCache（如果CDN加载失败，使用localStorage作为后备）
+            let wsCache;
+            try {
+                if (typeof WebStorageCache !== 'undefined') {
+                    wsCache = new WebStorageCache({
+                        storage: 'localStorage'
+                    });
+                } else {
+                    // 后备方案：直接使用localStorage
+                    wsCache = {
+                        set: function(key, value) {
+                            localStorage.setItem(key, value);
+                        }
+                    };
+                }
+            } catch (e) {
+                console.error('WebStorageCache init error:', e);
+                wsCache = {
+                    set: function(key, value) {
+                        localStorage.setItem(key, value);
+                    }
+                };
+            }
+            
+            // 全局函数
+            window.handleLogin = async function(userIdStr, userName, userAccount) {
+                console.log('handleLogin called:', userIdStr, 'type:', typeof userIdStr, userName, userAccount);
+                const messageEl = document.getElementById('message');
+                const userListEl = document.getElementById('userList');
+                
+                if (!messageEl || !userListEl) {
+                    alert('页面元素未找到');
+                    return;
+                }
+                
+                // 显示加载状态
+                messageEl.className = 'message loading';
+                messageEl.textContent = '正在登录...';
+                messageEl.classList.add('show');
+                userListEl.style.opacity = '0.5';
+                userListEl.style.pointerEvents = 'none';
+                
+                try {
+                    // 将用户ID作为字符串传递，后端会转换为整数
+                    console.log('Sending login request for user (string):', userIdStr);
+                    const response = await fetch('/api/v1/login/autoLogin/direct', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ user_id: userIdStr })
+                    });
+                    console.log('Response status:', response.status, response.statusText);
+                    console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+                    
+                    // 检查响应状态
+                    if (!response.ok) {
+                        // 尝试解析错误信息
+                        let errorDetail = '登录失败';
+                        try {
+                            const contentType = response.headers.get('content-type');
+                            console.log('Error response content-type:', contentType);
+                            
+                            if (contentType && contentType.includes('application/json')) {
+                                const errorData = await response.json();
+                                console.error('Error response JSON:', errorData);
+                                errorDetail = errorData.detail || errorData.message || errorDetail;
+                            } else {
+                                const text = await response.text();
+                                console.error('Error response text:', text);
+                                errorDetail = text || `HTTP ${response.status}: ${response.statusText}`;
+                            }
+                        } catch (e) {
+                            console.error('Failed to parse error response:', e);
+                            const text = await response.text();
+                            console.error('Error response text (fallback):', text);
+                            errorDetail = `HTTP ${response.status}: ${response.statusText}`;
+                        }
+                        throw new Error(errorDetail);
+                    }
+                    
+                    // 检查响应内容类型
+                    const contentType = response.headers.get('content-type');
+                    console.log('Response content-type:', contentType);
+                    
+                    let data;
+                    try {
+                        if (contentType && contentType.includes('application/json')) {
+                            const responseText = await response.text();
+                            console.log('Response text (raw):', responseText);
+                            data = JSON.parse(responseText);
+                            console.log('Login response (parsed):', data);
+                            console.log('Response keys:', Object.keys(data));
+                        } else {
+                            // 如果不是JSON，尝试解析为JSON
+                            const responseText = await response.text();
+                            console.log('Response text (non-JSON):', responseText);
+                            data = JSON.parse(responseText);
+                            console.log('Login response (parsed from text):', data);
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse response as JSON:', e);
+                        const responseText = await response.text();
+                        console.error('Response text:', responseText);
+                        throw new Error('响应格式错误：无法解析JSON');
+                    }
+                    
+                    // 检查响应结构：后端ResponseMiddleware会将响应包装为 {code: 0, data: {...}, msg: null}
+                    // 所以token在 data.data.access_token 中
+                    let token = null;
+                    if (data.code === 0 && data.data) {
+                        // 标准响应格式：{code: 0, data: {access_token: "...", token_type: "bearer"}, msg: null}
+                        token = data.data.access_token || data.data.accessToken || data.data.token;
+                    } else if (data.access_token) {
+                        // 直接返回Token对象的情况（理论上不应该发生，因为中间件会包装）
+                        token = data.access_token;
+                    }
+                    
+                    console.log('Token found:', !!token, 'Token value:', token ? token.substring(0, 20) + '...' : 'null');
+                    console.log('Response code:', data.code, 'Response data:', data.data);
+                    
+                    if (token) {
+                        // 使用 WebStorageCache 保存 token（与前端保持一致）
+                        wsCache.set('user.token', token);
+                        console.log('Token saved successfully');
+                        
+                        // 显示成功消息
+                        messageEl.className = 'message success show';
+                        messageEl.textContent = '欢迎，' + (userName || userAccount) + '！正在跳转...';
+                        
+                        // 延迟跳转
+                        setTimeout(() => {
+                            window.location.href = '{{frontend_host}}/#/chat/index';
+                        }, 1000);
+                    } else {
+                        console.error('No token in response. Full response:', data);
+                        console.error('Response structure:', JSON.stringify(data, null, 2));
+                        const errorMsg = data.msg || data.message || data.detail || '登录失败：未返回token';
+                        throw new Error(errorMsg);
+                    }
+                } catch (error) {
+                    console.error('Login error:', error);
+                    let errorMessage = '登录失败，请重试';
+                    if (error.message) {
+                        errorMessage = error.message;
+                    }
+                    messageEl.className = 'message error show';
+                    messageEl.textContent = errorMessage;
+                    userListEl.style.opacity = '1';
+                    userListEl.style.pointerEvents = 'auto';
+                }
+            };
+            
+            // 为所有用户卡片添加点击事件
+            const userCards = document.querySelectorAll('.user-card');
+            userCards.forEach(function(card) {
+                card.addEventListener('click', function() {
+                    // 解码 base64 编码的用户ID（保持为字符串，避免JavaScript大数精度问题）
+                    const userIdEnc = this.getAttribute('data-user-id-enc');
+                    let userIdStr = null;
+                    try {
+                        if (userIdEnc) {
+                            userIdStr = atob(userIdEnc); // 保持为字符串，不转换为数字
+                        }
+                    } catch (e) {
+                        console.error('Failed to decode user ID:', e);
+                        return;
+                    }
+                    
+                    if (!userIdStr) {
+                        console.error('Invalid user ID');
+                        return;
+                    }
+                    
+                    console.log('Decoded user ID (string):', userIdStr);
+                    
+                    // 解码 base64 编码的用户名和账号
+                    const userNameEnc = this.getAttribute('data-user-name-enc');
+                    const userAccountEnc = this.getAttribute('data-user-account-enc');
+                    let userName = '';
+                    let userAccount = '';
+                    try {
+                        if (userNameEnc) {
+                            userName = atob(userNameEnc);
+                        }
+                        if (userAccountEnc) {
+                            userAccount = atob(userAccountEnc);
+                        }
+                    } catch (e) {
+                        console.error('Decode error:', e);
+                        // 如果解码失败，从显示的文本中获取
+                        const nameEl = this.querySelector('.user-name');
+                        const accountEl = this.querySelector('.user-account');
+                        userName = nameEl ? nameEl.textContent.trim() : '';
+                        userAccount = accountEl ? accountEl.textContent.trim() : '';
+                    }
+                    window.handleLogin(userIdStr, userName, userAccount);
+                });
+            });
+        });
+    </script>
+</body>
+</html>
+

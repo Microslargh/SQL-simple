@@ -2,7 +2,7 @@
 import type { ChatMessage } from '@/api/chat.ts'
 import DisplayChartBlock from '@/views/chat/component/DisplayChartBlock.vue'
 import ChartPopover from '@/views/chat/chat-block/ChartPopover.vue'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useClipboard } from '@vueuse/core'
 import { concat } from 'lodash-es'
 import type { ChartTypes } from '@/views/chat/component/BaseChart.ts'
@@ -155,7 +155,28 @@ const defaultChartType = computed<ChartTypes>(() => {
 })
 
 // 默认图表类型：如果用户提问包含图表关键词，优先显示图表，否则显示表格
-const currentChartType = ref<ChartTypes | undefined>(props.chatType ?? defaultChartType.value)
+// 初始值设为 undefined，让 watch 来决定
+const currentChartType = ref<ChartTypes | undefined>(props.chatType)
+
+// 监听 chartObject 和 defaultChartType 的变化，自动更新图表类型
+watch(
+  [() => chartObject.value?.type, defaultChartType, () => hasChartKeywords.value],
+  ([chartType, defaultType, hasKeywords]) => {
+    // 如果用户已经手动选择了图表类型（通过 props.chatType），则不自动更新
+    if (props.chatType) {
+      return
+    }
+    
+    // 如果用户提问包含图表关键词，且后端返回了图表类型（非table），优先使用图表类型
+    if (hasKeywords && chartType && chartType !== 'table') {
+      currentChartType.value = chartType
+    } else {
+      // 否则使用默认类型（通常是 table）
+      currentChartType.value = defaultType
+    }
+  },
+  { immediate: true }
+)
 
 const chartType = computed<ChartTypes>({
   get() {

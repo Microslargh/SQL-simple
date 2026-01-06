@@ -50,8 +50,43 @@ export class Table extends BaseChart {
     return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   }
 
-  // 处理数据：添加序号列和格式化数值
+  // 判断字段是否为数值类型
+  private isNumericField(value: any): boolean {
+    if (value === null || value === undefined || value === '') {
+      return false
+    }
+    const num = Number(value)
+    return !isNaN(num) && isFinite(num)
+  }
+
+  // 计算汇总行数据
+  private calculateSummaryRow(axis: Array<ChartAxis>, data: Array<ChartData>): ChartData {
+    const summaryRow: ChartData = {
+      __index__: '汇总',
+    }
+    
+    axis.forEach((col) => {
+      const values = data.map(row => row[col.value]).filter(v => this.isNumericField(v))
+      
+      if (values.length > 0) {
+        // 计算数值字段的总和
+        const sum = values.reduce((acc, val) => acc + Number(val), 0)
+        summaryRow[col.value] = this.formatNumber(sum)
+      } else {
+        // 非数值字段显示空或"汇总"
+        summaryRow[col.value] = ''
+      }
+    })
+    
+    return summaryRow
+  }
+
+  // 处理数据：添加序号列、格式化数值和汇总行
   private processData(axis: Array<ChartAxis>, data: Array<ChartData>): { processedAxis: Array<ChartAxis>, processedData: Array<ChartData> } {
+    if (!data || data.length === 0) {
+      return { processedAxis: axis, processedData: [] }
+    }
+
     // 添加序号列
     const indexAxis: ChartAxis = {
       name: '序号',
@@ -69,13 +104,8 @@ export class Table extends BaseChart {
       axis.forEach((col) => {
         const value = row[col.value]
         // 判断是否为数值类型
-        if (value !== null && value !== undefined && value !== '') {
-          const num = Number(value)
-          if (!isNaN(num)) {
-            processedRow[col.value] = this.formatNumber(value)
-          } else {
-            processedRow[col.value] = value
-          }
+        if (this.isNumericField(value)) {
+          processedRow[col.value] = this.formatNumber(value)
         } else {
           processedRow[col.value] = value
         }
@@ -83,6 +113,10 @@ export class Table extends BaseChart {
       
       return processedRow
     })
+    
+    // 添加汇总行
+    const summaryRow = this.calculateSummaryRow(axis, data)
+    processedData.push(summaryRow)
     
     return { processedAxis, processedData }
   }

@@ -32,8 +32,66 @@ export class Table extends BaseChart {
     }
   }
 
+  // 格式化数字为千位分隔符
+  private formatNumber(value: any): string {
+    if (value === null || value === undefined || value === '') {
+      return '-'
+    }
+    // 尝试转换为数字
+    const num = Number(value)
+    if (isNaN(num)) {
+      return String(value)
+    }
+    // 如果是整数，使用千位分隔符
+    if (Number.isInteger(num)) {
+      return num.toLocaleString('en-US')
+    }
+    // 如果是小数，保留两位小数并使用千位分隔符
+    return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  }
+
+  // 处理数据：添加序号列和格式化数值
+  private processData(axis: Array<ChartAxis>, data: Array<ChartData>): { processedAxis: Array<ChartAxis>, processedData: Array<ChartData> } {
+    // 添加序号列
+    const indexAxis: ChartAxis = {
+      name: '序号',
+      value: '__index__',
+    }
+    const processedAxis = [indexAxis, ...axis]
+    
+    // 处理数据：添加序号和格式化数值
+    const processedData = data.map((row, index) => {
+      const processedRow: ChartData = {
+        __index__: index + 1,
+      }
+      
+      // 复制原始数据并格式化数值
+      axis.forEach((col) => {
+        const value = row[col.value]
+        // 判断是否为数值类型
+        if (value !== null && value !== undefined && value !== '') {
+          const num = Number(value)
+          if (!isNaN(num)) {
+            processedRow[col.value] = this.formatNumber(value)
+          } else {
+            processedRow[col.value] = value
+          }
+        } else {
+          processedRow[col.value] = value
+        }
+      })
+      
+      return processedRow
+    })
+    
+    return { processedAxis, processedData }
+  }
+
   init(axis: Array<ChartAxis>, data: Array<ChartData>) {
-    super.init(axis, data)
+    // 处理数据：添加序号和格式化
+    const { processedAxis, processedData } = this.processData(axis, data)
+    
+    super.init(processedAxis, processedData)
 
     const s2DataConfig: S2DataConfig = {
       fields: {

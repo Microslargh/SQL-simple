@@ -121,16 +121,48 @@ const chartObject = computed<{
   return {}
 })
 
-// 默认始终使用表格显示，除非用户明确选择了其他类型
-const currentChartType = ref<ChartTypes | undefined>(props.chatType ?? 'table')
+// 检查用户提问是否包含图表关键词
+const hasChartKeywords = computed(() => {
+  const question = props.message?.record?.question || ''
+  if (!question) return false
+  
+  const chartKeywords = [
+    '柱状图', '柱图', 'column', 'bar chart',
+    '折线图', '折线', 'line', 'line chart',
+    '条形图', 'bar',
+    '饼图', 'pie', 'pie chart',
+    '图表', 'chart', '可视化'
+  ]
+  
+  const questionLower = String(question).toLowerCase()
+  return chartKeywords.some(keyword => questionLower.includes(keyword.toLowerCase()))
+})
+
+// 根据用户提问和图表类型决定默认显示类型
+const defaultChartType = computed<ChartTypes>(() => {
+  // 如果用户明确指定了图表类型，使用指定的类型
+  if (props.chatType && props.chatType !== 'table') {
+    return props.chatType
+  }
+  
+  // 如果用户提问包含图表关键词，优先显示图表
+  if (hasChartKeywords.value && chartObject.value?.type && chartObject.value.type !== 'table') {
+    return chartObject.value.type
+  }
+  
+  // 默认显示表格
+  return 'table'
+})
+
+// 默认图表类型：如果用户提问包含图表关键词，优先显示图表，否则显示表格
+const currentChartType = ref<ChartTypes | undefined>(props.chatType ?? defaultChartType.value)
 
 const chartType = computed<ChartTypes>({
   get() {
     if (currentChartType.value) {
       return currentChartType.value
     }
-    // 默认始终返回 table，优先显示表格
-    return props.chatType ?? 'table'
+    return defaultChartType.value
   },
   set(v) {
     currentChartType.value = v

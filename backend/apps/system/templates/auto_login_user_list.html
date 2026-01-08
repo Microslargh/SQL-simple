@@ -273,16 +273,24 @@
                     if (token) {
                         // 使用 WebStorageCache 保存 token（与前端保持一致）
                         wsCache.set('user.token', token);
+                        // 同时保存到 localStorage 作为备用
+                        try {
+                            localStorage.setItem('user.token', token);
+                        } catch(e) {
+                            console.warn('Failed to save token to localStorage:', e);
+                        }
                         console.log('Token saved successfully');
                         
                         // 显示成功消息
                         messageEl.className = 'message success show';
                         messageEl.textContent = '欢迎，' + (userName || userAccount) + '！正在跳转...';
                         
-                        // 延迟跳转
+                        // 延迟跳转，确保 token 已保存
                         setTimeout(() => {
-                            window.location.href = '{{frontend_host}}/#/chat/index';
-                        }, 1000);
+                            // 使用 URL 参数传递 token 作为备用方案
+                            const redirectUrl = '{{frontend_host}}/#/chat/index?token=' + encodeURIComponent(token);
+                            window.location.href = redirectUrl;
+                        }, 500);
                     } else {
                         console.error('No token in response. Full response:', data);
                         console.error('Response structure:', JSON.stringify(data, null, 2));

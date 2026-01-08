@@ -15,6 +15,25 @@ export const watchRouter = (router: Router) => {
     await loadXpackStatic()
     await appearanceStore.setAppearance()
     LicenseGenerator.generateRouters(router)
+    
+    // 检查 URL 参数中是否有 token（用于 autoLogin 跳转）
+    if (to.query.token) {
+      const urlToken = to.query.token as string
+      console.log('Token found in URL, saving to cache')
+      wsCache.set('user.token', urlToken)
+      // 同时保存到 localStorage 作为备用
+      try {
+        localStorage.setItem('user.token', urlToken)
+      } catch(e) {
+        console.warn('Failed to save token to localStorage:', e)
+      }
+      // 移除 URL 中的 token 参数，避免泄露
+      const newQuery = { ...to.query }
+      delete newQuery.token
+      next({ path: to.path, query: newQuery, replace: true })
+      return
+    }
+    
     if (to.path.startsWith('/login') && userStore.getUid) {
       next('/')
       return
@@ -23,7 +42,17 @@ export const watchRouter = (router: Router) => {
       next()
       return
     }
-    const token = wsCache.get('user.token')
+    // 尝试从多个来源获取 token
+    let token = wsCache.get('user.token')
+    // 如果 wsCache 中没有，尝试从 localStorage 直接读取
+    if (!token) {
+      try {
+        token = localStorage.getItem('user.token')
+      } catch(e) {
+        console.warn('Failed to read token from localStorage:', e)
+      }
+    }
+    
     if (whiteList.includes(to.path)) {
       next()
       return
@@ -57,10 +86,30 @@ export const watchRouter = (router: Router) => {
       next('/login')
       return
     }
+    
+    // 检查 localStorage 中的 token 和 userStore 中的 token 是否一致
+    // 如果不一致，说明可能是新登录的用户，需要更新 userStore 并重新加载用户信息
+    const storeToken = userStore.getToken
+    const tokenMismatch = token && token !== storeToken
+    if (tokenMismatch) {
+      console.log('Token mismatch detected, updating userStore and reloading user info', {
+        localStorageToken: token ? token.substring(0, 20) + '...' : 'null',
+        storeToken: storeToken ? storeToken.substring(0, 20) + '...' : 'null'
+      })
+      userStore.setToken(token)
+    }
+    
     // 确保用户信息已加载（无论是否有 uid，都重新加载一次以确保权限信息是最新的）
-    if (!userStore.getUid || userStore.getWeight === undefined || userStore.getWeight === 0) {
+    // 如果 token 不一致，也需要重新加载用户信息
+    if (!userStore.getUid || userStore.getWeight === undefined || userStore.getWeight === 0 || tokenMismatch) {
       try {
+        console.log('Loading user info...', { hasUid: !!userStore.getUid, tokenMismatch })
         await userStore.info()
+        console.log('User info loaded successfully:', {
+          uid: userStore.getUid,
+          account: userStore.getAccount,
+          name: userStore.getName
+        })
       } catch (error) {
         console.error('Failed to load user info:', error)
         // 如果加载失败，跳转到登录页

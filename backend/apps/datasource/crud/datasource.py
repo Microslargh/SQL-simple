@@ -27,14 +27,85 @@ def get_datasource_list(session: SessionDep, user: CurrentUser, oid: Optional[in
     current_oid = user.oid if user.oid is not None else 1
     if user.isAdmin and oid:
         current_oid = oid
+    
+    # 管理员默认有所有数据源访问权限
+    if user.isAdmin:
+        return session.exec(
+            select(CoreDatasource).where(CoreDatasource.oid == current_oid).order_by(CoreDatasource.name)).all()
+    
+    # 检查用户数据源访问权限
+    from apps.system.models.system_model import UserWsModel, UserDatasourceModel
+    user_ws = session.exec(
+        select(UserWsModel).where(
+            UserWsModel.uid == user.id,
+            UserWsModel.oid == current_oid
+        )
+    ).first()
+    
+    if not user_ws:
+        # 用户不在该工作空间，返回空列表
+        return []
+    
+    # 如果用户是工作空间管理员（weight > 0），默认有所有数据源访问权限
+    if user_ws.weight > 0:
+        return session.exec(
+            select(CoreDatasource).where(CoreDatasource.oid == current_oid).order_by(CoreDatasource.name)).all()
+    
+    # 普通成员：只返回有权限的数据源
+    allowed_ds_ids = session.exec(
+        select(UserDatasourceModel.ds_id).where(
+            UserDatasourceModel.uid == user.id,
+            UserDatasourceModel.oid == current_oid
+        )
+    ).all()
+    
+    if not allowed_ds_ids:
+        return []
+    
     return session.exec(
-        select(CoreDatasource).where(CoreDatasource.oid == current_oid).order_by(CoreDatasource.name)).all()
+        select(CoreDatasource).where(
+            CoreDatasource.oid == current_oid,
+            CoreDatasource.id.in_(allowed_ds_ids)
+        ).order_by(CoreDatasource.name)
+    ).all()
 
 
-def get_ds(session: SessionDep, id: int):
+def get_ds(session: SessionDep, id: int, current_user: Optional[CurrentUser] = None):
     statement = select(CoreDatasource).where(CoreDatasource.id == id)
-    datasource = session.exec(statement).first()
-    return datasource
+    ds = session.exec(statement).first()
+    
+    # 如果提供了 current_user，检查数据源访问权限
+    if ds and current_user and not current_user.isAdmin:
+        from apps.system.models.system_model import UserWsModel, UserDatasourceModel
+        user_ws = session.exec(
+            select(UserWsModel).where(
+                UserWsModel.uid == current_user.id,
+                UserWsModel.oid == ds.oid
+            )
+        ).first()
+        
+        if not user_ws:
+            # 用户不在该工作空间，返回 None
+            return None
+        
+        # 如果用户是工作空间管理员（weight > 0），默认有权限
+        if user_ws.weight > 0:
+            return ds
+        
+        # 普通成员：检查是否有该数据源的访问权限
+        user_ds = session.exec(
+            select(UserDatasourceModel).where(
+                UserDatasourceModel.uid == current_user.id,
+                UserDatasourceModel.oid == ds.oid,
+                UserDatasourceModel.ds_id == ds.id
+            )
+        ).first()
+        
+        if not user_ds:
+            # 没有该数据源的访问权限，返回 None
+            return None
+    
+    return ds
 
 
 def check_status_by_id(session: SessionDep, trans: Trans, ds_id: int, is_raise: bool = False):

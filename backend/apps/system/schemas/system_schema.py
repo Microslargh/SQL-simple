@@ -85,12 +85,21 @@ class UserWsBase(BaseModel):
 
 class UserWsDTO(UserWsBase):
     weight: Optional[int] = 0
+    datasource_access: Optional[bool] = False
 
 
 class UserWsEditor(BaseModel):
     uid: int
     oid: int
     weight: int = 0
+    datasource_access: Optional[bool] = None  # 保留用于兼容，但不再使用
+    datasource_ids: Optional[list[int]] = None  # 用户可访问的数据源ID列表
+
+
+class UserDatasourceDTO(BaseModel):
+    uid: int
+    oid: int
+    ds_id_list: list[int]  # 数据源ID列表
 
 
 class UserInfoDTO(UserEditor):
@@ -143,6 +152,8 @@ class AssistantValidator(BaseModel):
 
 class WorkspaceUser(UserEditor):
     weight: int
+    datasource_access: bool = False  # 保留用于兼容，但不再使用
+    datasource_ids: list[int] = []  # 用户可访问的数据源ID列表
     create_time: int
 
 

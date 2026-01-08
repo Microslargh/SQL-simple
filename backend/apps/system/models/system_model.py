@@ -38,9 +38,19 @@ class UserWsBaseModel(SQLModel):
     uid: int = Field(nullable=False, sa_type=BigInteger())
     oid: int = Field(nullable=False, sa_type=BigInteger())
     weight: int =  Field(default=0, nullable=False)
+    datasource_access: bool = Field(default=False, nullable=False, description="数据源访问权限，默认无权限")
     
 class UserWsModel(SnowflakeBase, UserWsBaseModel, table=True):
     __tablename__ = "sys_user_ws"
+    
+
+class UserDatasourceBaseModel(SQLModel):
+    uid: int = Field(nullable=False, sa_type=BigInteger(), description="用户ID")
+    oid: int = Field(nullable=False, sa_type=BigInteger(), description="工作空间ID")
+    ds_id: int = Field(nullable=False, sa_type=BigInteger(), description="数据源ID")
+    
+class UserDatasourceModel(SnowflakeBase, UserDatasourceBaseModel, table=True):
+    __tablename__ = "sys_user_datasource"
     
 
 class AssistantBaseModel(SQLModel):

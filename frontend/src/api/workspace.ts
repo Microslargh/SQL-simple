@@ -8,6 +8,7 @@ export const workspaceOptionUserList = (params: any, pageNum: number, pageSize: 
 
 export const workspaceUwsCreate = (data: any) => request.post('/system/workspace/uws', data)
 export const workspaceUwsUpdate = (data: any) => request.put('/system/workspace/uws', data)
+export const workspaceDatasourceList = (oid: any) => request.get(`/datasource/ws/${oid}`)
 export const workspaceCreate = (data: any) => request.post('/system/workspace', data)
 export const workspaceUpdate = (data: any) => request.put('/system/workspace', data)
 export const workspaceUwsDelete = (data: any) => request.delete('/system/workspace/uws', { data })

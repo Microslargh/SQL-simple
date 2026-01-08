@@ -8,6 +8,7 @@ import {
   workspaceCreate,
   workspaceUpdate,
   workspaceUwsUpdate,
+  workspaceDatasourceList,
 } from '@/api/workspace'
 import icon_add_outlined from '@/assets/svg/icon_add_outlined.svg'
 import arrow_down from '@/assets/svg/arrow-down.svg'
@@ -65,6 +66,37 @@ const handleUserTypeChange = (val: any, row: any) => {
       type: 'success',
       message: t('common.save_success'),
     })
+    search()
+  })
+}
+
+const datasourceDialog = ref<boolean>(false)
+const currentUserForDs = ref<any>(null)
+const datasourceList = ref<any[]>([])
+const selectedDatasourceIds = ref<number[]>([])
+
+const openDatasourceDialog = (row: any) => {
+  currentUserForDs.value = row
+  selectedDatasourceIds.value = row.datasource_ids || []
+  // 加载工作空间的数据源列表
+  workspaceDatasourceList(currentTable.value.id).then((res) => {
+    datasourceList.value = res || []
+  })
+  datasourceDialog.value = true
+}
+
+const handleDatasourceSave = () => {
+  if (!currentUserForDs.value) return
+  workspaceUwsUpdate({
+    uid: currentUserForDs.value.id,
+    oid: currentTable.value.id,
+    datasource_ids: selectedDatasourceIds.value,
+  }).then(() => {
+    ElMessage({
+      type: 'success',
+      message: t('common.save_success'),
+    })
+    datasourceDialog.value = false
     search()
   })
 }
@@ -479,6 +511,25 @@ const handleCurrentChange = (val: number) => {
                 </el-popover>
               </template>
             </el-table-column>
+            <el-table-column
+              prop="datasource_ids"
+              :label="$t('workspace.datasource_access')"
+              width="180"
+            >
+              <template #default="scope">
+                <el-button
+                  link
+                  type="primary"
+                  @click="openDatasourceDialog(scope.row)"
+                >
+                  {{
+                    scope.row.datasource_ids?.length
+                      ? t('workspace.selected_datasources', { msg: scope.row.datasource_ids.length })
+                      : t('workspace.no_datasource_access')
+                  }}
+                </el-button>
+              </template>
+            </el-table-column>
             <el-table-column fixed="right" width="80" :label="t('ds.actions')">
               <template #default="scope">
                 <div class="field-comment">
@@ -581,6 +632,43 @@ const handleCurrentChange = (val: number) => {
       <el-button secondary @click="closeField">{{ t('common.cancel') }}</el-button>
       <el-button type="primary" @click="saveField">{{
         t(workspaceForm.id ? 'common.save' : 'model.add')
+      }}</el-button>
+    </div>
+  </el-dialog>
+  <el-dialog
+    v-model="datasourceDialog"
+    :title="$t('workspace.manage_datasource_access')"
+    width="600"
+    destroy-on-close
+    :close-on-click-modal="false"
+  >
+    <div v-if="currentUserForDs" style="margin-bottom: 16px">
+      <span style="font-weight: 500">{{ $t('user.name') }}: {{ currentUserForDs.name }}</span>
+      <span style="margin-left: 16px; font-weight: 500">{{ $t('user.account') }}: {{ currentUserForDs.account }}</span>
+    </div>
+    <el-checkbox-group v-model="selectedDatasourceIds" style="width: 100%">
+      <div
+        v-for="ds in datasourceList"
+        :key="ds.id"
+        style="margin-bottom: 12px; padding: 12px; border: 1px solid #e4e7ed; border-radius: 4px"
+      >
+        <el-checkbox :label="ds.id">
+          <div>
+            <div style="font-weight: 500">{{ ds.name }}</div>
+            <div v-if="ds.description" style="font-size: 12px; color: #909399; margin-top: 4px">
+              {{ ds.description }}
+            </div>
+          </div>
+        </el-checkbox>
+      </div>
+    </el-checkbox-group>
+    <div v-if="!datasourceList.length" style="text-align: center; padding: 40px; color: #909399">
+      {{ $t('workspace.no_datasource_in_workspace') }}
+    </div>
+    <div style="display: flex; justify-content: flex-end; margin-top: 20px">
+      <el-button secondary @click="datasourceDialog = false">{{ t('common.cancel') }}</el-button>
+      <el-button type="primary" @click="handleDatasourceSave">{{
+        t('common.save')
       }}</el-button>
     </div>
   </el-dialog>

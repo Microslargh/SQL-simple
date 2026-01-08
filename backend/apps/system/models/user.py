@@ -18,8 +18,8 @@ class BaseUserPO(SQLModel):
     create_time: int = Field(default_factory=get_timestamp, sa_type=BigInteger(), nullable=False)
     language: str = Field(max_length=255, default="zh-CN")
     register_type: int = Field(default=0, nullable=False, description="注册类型：0-系统注册，1-4a平台注册，2-钉钉用户注册")
-    orgname: str = Field(max_length=255,description="部门名称")
-    userorg: str = Field(max_length=255, description="部门编码")
+    orgname: Optional[str] = Field(default=None, max_length=255, nullable=True, description="部门名称")
+    userorg: Optional[str] = Field(default=None, max_length=255, nullable=True, description="部门编码")
 
 
 class UserModel(SnowflakeBase, BaseUserPO, table=True):

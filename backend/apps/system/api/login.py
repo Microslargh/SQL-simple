@@ -24,6 +24,25 @@ import json
 router = APIRouter(tags=["login"], prefix="/login")
 
 
+def prepare_token_data(user_dict: dict) -> dict:
+    """
+    准备 token 数据，确保 id 作为字符串存储（避免 JavaScript 大数精度问题）
+    """
+    user_id = user_dict.get("id")
+    if isinstance(user_id, str):
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            SQLBotLogUtil.error(f"Invalid user_id format: {user_id}")
+            raise HTTPException(status_code=500, detail="Invalid user_id format")
+    
+    return {
+        "id": str(int(user_id)) if user_id is not None else None,  # 作为字符串存储
+        "account": user_dict.get("account"),
+        "oid": int(user_dict.get("oid")) if user_dict.get("oid") is not None else None
+    }
+
+
 class AutoLoginRequest(BaseModel):
     """自动登录请求（仅需用户名）"""
     username: str = Field(..., min_length=1, max_length=100, description="用户名/账号")
@@ -51,8 +70,9 @@ async def local_login(
         raise HTTPException(status_code=400, detail=trans('i18n_login.user_disable', msg = trans('i18n_concat_admin')))
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     user_dict = user.to_dict()
+    token_data = prepare_token_data(user_dict)
     return Token(access_token=create_access_token(
-        user_dict, expires_delta=access_token_expires
+        token_data, expires_delta=access_token_expires
     ))
 
 
@@ -144,11 +164,7 @@ async def dingtalk_login(
         else:
             user_dict = user_info.model_dump()
         # 转换为 token 格式（只需要 id, account, oid）
-        token_data = {
-            "id": user_dict.get("id"),
-            "account": user_dict.get("account"),
-            "oid": user_dict.get("oid")
-        }
+        token_data = prepare_token_data(user_dict)
         token = create_access_token(token_data, expires_delta=access_token_expires)
         
         SQLBotLogUtil.info(f"Auto login successful for existing user: account={account}")
@@ -226,11 +242,7 @@ async def dingtalk_login(
         else:
             user_dict = user_info.model_dump()
         # 转换为 token 格式（只需要 id, account, oid）
-        token_data = {
-            "id": user_dict.get("id"),
-            "account": user_dict.get("account"),
-            "oid": user_dict.get("oid")
-        }
+        token_data = prepare_token_data(user_dict)
         token = create_access_token(token_data, expires_delta=access_token_expires)
         
         SQLBotLogUtil.info(f"Auto login successful for new user: account={account}, id={new_user.id}")
@@ -373,11 +385,9 @@ async def direct_login(session: SessionDep, request: DirectLoginRequest) -> Toke
         else:
             user_dict = user_info.model_dump()
         
-        token_data = {
-            "id": user_dict.get("id"),
-            "account": user_dict.get("account"),
-            "oid": user_dict.get("oid")
-        }
+        # 转换为 token 格式（只需要 id, account, oid）
+        token_data = prepare_token_data(user_dict)
+        SQLBotLogUtil.info(f"Creating token with data: id={token_data['id']} (as string), account={token_data['account']}, oid={token_data['oid']}")
         token = create_access_token(token_data, expires_delta=access_token_expires)
         
         SQLBotLogUtil.info(f"Direct login successful for user: id={db_user.id}, account={db_user.account}")

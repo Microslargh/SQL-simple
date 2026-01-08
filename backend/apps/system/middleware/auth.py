@@ -76,7 +76,20 @@ class TokenMiddleware(BaseHTTPMiddleware):
             payload = jwt.decode(
                 param, settings.SECRET_KEY, algorithms=[security.ALGORITHM]
             )
+            # 确保 id 是整数类型（JWT 中 id 作为字符串存储以避免 JavaScript 大数精度问题）
+            if 'id' in payload:
+                if isinstance(payload['id'], str):
+                    try:
+                        payload['id'] = int(payload['id'])
+                    except (ValueError, TypeError):
+                        SQLBotLogUtil.error(f"Invalid user_id format in token: {payload['id']}")
+                        return False, "Invalid user_id format in token"
+                elif isinstance(payload['id'], (int, float)):
+                    # 如果已经是数字，确保是整数
+                    payload['id'] = int(payload['id'])
+            
             token_data = TokenPayload(**payload)
+            SQLBotLogUtil.info(f"Token validated: id={token_data.id}, account={token_data.account}, oid={token_data.oid}")
             with Session(engine) as session:
                 session_user = await get_user_info(session = session, user_id = token_data.id)
                 if not session_user:

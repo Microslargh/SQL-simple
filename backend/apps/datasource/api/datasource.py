@@ -38,8 +38,11 @@ async def datasource_list(session: SessionDep, user: CurrentUser):
 
 
 @router.post("/get/{id}")
-async def get_datasource(session: SessionDep, id: int):
-    return get_ds(session, id)
+async def get_datasource(session: SessionDep, user: CurrentUser, id: int):
+    ds = get_ds(session, id, current_user=user)
+    if not ds:
+        raise HTTPException(status_code=403, detail="No permission to access this datasource")
+    return ds
 
 
 @router.post("/check")

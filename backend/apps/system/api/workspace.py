@@ -3,9 +3,9 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import exists, or_, select, delete as sqlmodel_delete   
 from apps.system.crud.user import clean_user_cache
 from apps.system.crud.workspace import reset_single_user_oid, reset_user_oid
-from apps.system.models.system_model import UserWsModel, WorkspaceBase, WorkspaceEditor, WorkspaceModel
+from apps.system.models.system_model import UserWsModel, WorkspaceBase, WorkspaceEditor, WorkspaceModel, UserDatasourceModel
 from apps.system.models.user import UserModel
-from apps.system.schemas.system_schema import UserWsBase, UserWsDTO, UserWsEditor, UserWsOption, WorkspaceUser
+from apps.system.schemas.system_schema import UserWsBase, UserWsDTO, UserWsEditor, UserWsOption, WorkspaceUser, UserDatasourceDTO
 from common.core.deps import CurrentUser, SessionDep, Trans
 from common.core.pagination import Paginator
 from common.core.schemas import PaginatedResponse, PaginationParams
@@ -92,7 +92,7 @@ async def pager(
         workspace_id = current_user.oid
     pagination = PaginationParams(page=pageNum, size=pageSize)
     paginator = Paginator(session)
-    stmt = select(UserModel.id, UserModel.account, UserModel.name, UserModel.email, UserModel.status, UserModel.create_time, UserModel.oid, UserWsModel.weight).join(
+    stmt = select(UserModel.id, UserModel.account, UserModel.name, UserModel.email, UserModel.status, UserModel.create_time, UserModel.oid, UserWsModel.weight, UserWsModel.datasource_access).join(
         UserWsModel, UserModel.id == UserWsModel.uid
     ).where(
         UserWsModel.oid == workspace_id,
@@ -108,10 +108,26 @@ async def pager(
                 UserModel.email.ilike(keyword_pattern)
             )
         )
-    return await paginator.get_paginated_response(
+    result = await paginator.get_paginated_response(
         stmt=stmt,
         pagination=pagination,
     )
+    
+    # 为每个用户查询其可访问的数据源ID列表
+    for item in result.items:
+        user_id = item.get('id')
+        if user_id:
+            ds_list = session.exec(
+                select(UserDatasourceModel.ds_id).where(
+                    UserDatasourceModel.uid == user_id,
+                    UserDatasourceModel.oid == workspace_id
+                )
+            ).all()
+            item['datasource_ids'] = list(ds_list) if ds_list else []
+        else:
+            item['datasource_ids'] = []
+    
+    return result
     
 
 @router.post("/uws")     
@@ -121,11 +137,14 @@ async def create(session: SessionDep, current_user: CurrentUser, trans: Trans, c
     oid: int = creator.oid if (current_user.isAdmin and creator.oid) else current_user.oid
     weight = creator.weight if (current_user.isAdmin and creator.weight) else 0
     # 判断uid_list以及oid合法性
+    # 数据源访问权限：管理员可以设置，普通管理员默认为 False（无权限）
+    datasource_access = creator.datasource_access if (current_user.isAdmin and creator.datasource_access is not None) else False
     db_model_list = [
         UserWsModel.model_validate({
             "oid": oid,
             "uid": uid,
-            "weight": weight
+            "weight": weight,
+            "datasource_access": datasource_access
         })
         for uid in creator.uid_list
     ]
@@ -143,14 +162,39 @@ async def edit(session: SessionDep, trans: Trans, editor: UserWsEditor):
     db_model = session.exec(select(UserWsModel).where(UserWsModel.uid == editor.uid, UserWsModel.oid == editor.oid)).first()
     if not db_model:
         raise HTTPException("uws not exist")
-    if editor.weight == db_model.weight:
-        return
     
-    db_model.weight = editor.weight
-    session.add(db_model)
+    # 更新 weight
+    updated = False
+    if editor.weight != db_model.weight:
+        db_model.weight = editor.weight
+        updated = True
     
-    await clean_user_cache(editor.uid)
-    session.commit()
+    # 更新用户-数据源关联
+    if editor.datasource_ids is not None:
+        # 删除旧的关联
+        session.exec(
+            sqlmodel_delete(UserDatasourceModel).where(
+                UserDatasourceModel.uid == editor.uid,
+                UserDatasourceModel.oid == editor.oid
+            )
+        )
+        # 创建新的关联
+        if editor.datasource_ids:
+            ds_model_list = [
+                UserDatasourceModel.model_validate({
+                    "uid": editor.uid,
+                    "oid": editor.oid,
+                    "ds_id": ds_id
+                })
+                for ds_id in editor.datasource_ids
+            ]
+            session.add_all(ds_model_list)
+        updated = True
+    
+    if updated:
+        session.add(db_model)
+        await clean_user_cache(editor.uid)
+        session.commit()
 
 @router.delete("/uws")     
 async def delete(session: SessionDep, current_user: CurrentUser, trans: Trans, dto: UserWsBase):
@@ -220,8 +264,19 @@ async def single_delete(session: SessionDep, id: int):
         await reset_user_oid(session, id)
         # delete user_ws
         session.exec(sqlmodel_delete(UserWsModel).where(UserWsModel.oid == id))
+        # delete user datasource associations
+        session.exec(sqlmodel_delete(UserDatasourceModel).where(UserDatasourceModel.oid == id))
         
     session.delete(db_model)
+    
+    # 删除用户-数据源关联
+    session.exec(
+        sqlmodel_delete(UserDatasourceModel).where(
+            UserDatasourceModel.uid.in_(dto.uid_list),
+            UserDatasourceModel.oid == oid
+        )
+    )
+    
     session.commit()
 
 

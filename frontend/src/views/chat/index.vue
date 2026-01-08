@@ -243,43 +243,24 @@
                               </el-icon>
                             </el-button>
                           </el-tooltip>
-                          <template v-if="message.record?.chart">
-                            <div class="divider"></div>
-                            <div>
-                              <el-button
-                                class="tool-btn"
-                                text
-                                :disabled="isTyping"
-                                @click="clickAnalysis(message.record?.id)"
-                              >
-                                <span class="tool-btn-inner">
-                                  <el-icon size="18">
-                                    <icon_screen_outlined />
-                                  </el-icon>
-                                  <span class="btn-text">
-                                    {{ t('chat.data_analysis') }}
-                                  </span>
+                          <!-- 数据分析按钮已移除，因为分析会在图表生成前自动完成 -->
+                          <div>
+                            <el-button
+                              class="tool-btn"
+                              text
+                              :disabled="isTyping"
+                              @click="clickPredict(message.record?.id)"
+                            >
+                              <span class="tool-btn-inner">
+                                <el-icon size="18">
+                                  <icon_start_outlined />
+                                </el-icon>
+                                <span class="btn-text">
+                                  {{ t('chat.data_predict') }}
                                 </span>
-                              </el-button>
-                            </div>
-                            <div>
-                              <el-button
-                                class="tool-btn"
-                                text
-                                :disabled="isTyping"
-                                @click="clickPredict(message.record?.id)"
-                              >
-                                <span class="tool-btn-inner">
-                                  <el-icon size="18">
-                                    <icon_start_outlined />
-                                  </el-icon>
-                                  <span class="btn-text">
-                                    {{ t('chat.data_predict') }}
-                                  </span>
-                                </span>
-                              </el-button>
-                            </div>
-                          </template>
+                              </span>
+                            </el-button>
+                          </div>
                         </div>
                       </ChatToolBar>
                     </template>

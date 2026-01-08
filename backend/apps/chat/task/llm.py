@@ -248,8 +248,26 @@ class LLMService:
                     fields.append(column_str)
         return fields
 
+    def get_fields_from_sql_result(self):
+        """从SQL执行结果中获取字段列表（用于在图表生成前进行分析）"""
+        data_obj = get_chat_chart_data(self.session, self.record.id, self.current_user)
+        fields = []
+        if data_obj and data_obj.get('fields'):
+            # 直接使用SQL执行结果中的字段名
+            fields = data_obj.get('fields', [])
+        return fields
+
     def generate_analysis(self):
-        fields = self.get_fields_from_chart()
+        # 尝试从图表配置获取字段，如果图表还未生成，则从SQL执行结果获取
+        try:
+            fields = self.get_fields_from_chart()
+            # 如果图表配置存在但字段为空，尝试从SQL结果获取
+            if not fields:
+                fields = self.get_fields_from_sql_result()
+        except Exception:
+            # 如果图表配置不存在（图表还未生成），从SQL执行结果获取字段
+            fields = self.get_fields_from_sql_result()
+        
         self.chat_question.fields = orjson.dumps(fields).decode()
         data = get_chat_chart_data(self.session, self.record.id, self.current_user)
         self.chat_question.data = orjson.dumps(data.get('data')).decode()
@@ -1227,7 +1245,40 @@ class LLMService:
                     yield json_result
                 return
 
-            # 步骤7：图表生成
+            # 步骤7：数据分析（在图表生成之前）
+            if in_chat:
+                yield 'data:' + orjson.dumps({
+                    'type': 'step-start',
+                    'step': 'data-analysis',
+                    'step_name': '数据分析',
+                    'description': '正在分析数据...'
+                }).decode() + '\n\n'
+            
+            # 生成文字分析（基于SQL执行结果）
+            analysis_res = self.generate_analysis()
+            full_analysis_text = ''
+            full_analysis_thinking = ''
+            for chunk in analysis_res:
+                if chunk.get('content'):
+                    full_analysis_text += chunk.get('content')
+                if chunk.get('reasoning_content'):
+                    full_analysis_thinking += chunk.get('reasoning_content')
+                if in_chat:
+                    yield 'data:' + orjson.dumps(
+                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
+                         'type': 'analysis-result'}).decode() + '\n\n'
+            
+            # 数据分析完成
+            if in_chat:
+                yield 'data:' + orjson.dumps({
+                    'type': 'step-complete',
+                    'step': 'data-analysis',
+                    'step_name': '数据分析',
+                    'description': '数据分析已完成'
+                }).decode() + '\n\n'
+                yield 'data:' + orjson.dumps({'type': 'analysis_finish'}).decode() + '\n\n'
+
+            # 步骤8：图表生成（在数据分析之后）
             if in_chat:
                 yield 'data:' + orjson.dumps({
                     'type': 'step-start',
@@ -1273,7 +1324,7 @@ class LLMService:
                 yield 'data:' + orjson.dumps(
                     {'content': orjson.dumps(chart).decode(), 'type': 'chart'}).decode() + '\n\n'
                 
-                # 步骤8：结果展示
+                # 步骤9：结果展示
                 # data_count在SQL执行步骤中已定义
                 chart_type_name = {'table': '表格', 'bar': '柱状图', 'line': '折线图', 'pie': '饼图'}.get(chart.get('type', 'table'), '图表')
                 yield 'data:' + orjson.dumps({

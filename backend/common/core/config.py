@@ -1,3 +1,4 @@
+import os
 import secrets
 from email.policy import default
 from typing import Annotated, Any, Literal
@@ -87,7 +88,8 @@ class Settings(BaseSettings):
     MCP_IMAGE_HOST: str = 'http://localhost:3000'
     SERVER_IMAGE_HOST: str = 'http://YOUR_SERVE_IP:MCP_PORT/images/'
 
-    LOCAL_MODEL_PATH: str = '/opt/sqlbot/models'
+    LOCAL_MODEL_PATH: str = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../my_model'))
+    # LOCAL_MODEL_PATH: str = '/opt/sqlbot/models'
     DEFAULT_EMBEDDING_MODEL: str = 'shibing624/text2vec-base-chinese'
     EMBEDDING_ENABLED: bool = True
     EMBEDDING_DEFAULT_SIMILARITY: float = 0.4

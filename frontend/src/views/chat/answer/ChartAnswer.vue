@@ -4,6 +4,7 @@ import { Chat, chatApi, ChatInfo, type ChatMessage, ChatRecord, questionApi } fr
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import ChartBlock from '@/views/chat/chat-block/ChartBlock.vue'
 import ProcessStep from '@/views/chat/component/ProcessStep.vue'
+import MdComponent from '@/views/chat/component/MdComponent.vue'
 import {ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 interface ProcessStepData {
   step: string
@@ -100,6 +101,7 @@ const stepOrder = [
   'table-retrieval',
   'sql-generation',
   'sql-execution',
+  'data-analysis',
   'chart-generation',
   'result-display',
 ]
@@ -167,6 +169,8 @@ const sendMessage = async () => {
 
     let sql_answer = ''
     let chart_answer = ''
+    let analysis_answer = ''
+    let analysis_answer_thinking = ''
 
     // 重置步骤状态
     processSteps.value.clear()
@@ -264,6 +268,15 @@ const sendMessage = async () => {
               case 'chart':
                 _currentChat.value.records[index.value].chart = data.content
                 break
+              case 'analysis-result':
+                analysis_answer += data.content
+                analysis_answer_thinking += data.reasoning_content || ''
+                _currentChat.value.records[index.value].analysis = analysis_answer
+                _currentChat.value.records[index.value].analysis_thinking = analysis_answer_thinking
+                break
+              case 'analysis_finish':
+                // 分析完成，但继续等待图表
+                break
               case 'finish':
                 emits('finish', currentRecord.id)
                 break
@@ -350,6 +363,10 @@ const ArrowDownF = () => {
           :result="step.result"
         />
       </div>
+    </div>
+    <!-- 显示分析结果（如果有） -->
+    <div v-if="message?.record?.analysis" style="margin-top: 12px; margin-bottom: 12px">
+      <MdComponent :message="message.record.analysis" />
     </div>
     <ChartBlock style="margin-top: 6px" :message="message" />
     <slot></slot>

@@ -8,6 +8,7 @@ from typing import List
 import orjson
 import pandas as pd
 from fastapi import APIRouter, File, UploadFile, HTTPException
+from sqlmodel import select
 
 from apps.db.db import get_schema
 from apps.db.engine import get_engine_conn
@@ -27,8 +28,23 @@ path = settings.EXCEL_PATH
 
 @router.get("/ws/{oid}", include_in_schema=False)
 async def query_by_oid(session: SessionDep, user: CurrentUser, oid: int) -> List[CoreDatasource]:
-    if not user.isAdmin:
-        raise Exception("no permission to execute")
+    # 系统管理员可以访问所有工作空间的数据源
+    if user.isAdmin:
+        return get_datasource_list(session=session, user=user, oid=oid)
+    
+    # 检查用户是否在该工作空间中，并且是该工作空间的管理员
+    from apps.system.models.system_model import UserWsModel
+    user_ws = session.exec(
+        select(UserWsModel).where(
+            UserWsModel.uid == user.id,
+            UserWsModel.oid == oid,
+            UserWsModel.weight > 0
+        )
+    ).first()
+    
+    if not user_ws:
+        raise HTTPException(status_code=403, detail="no permission to execute")
+    
     return get_datasource_list(session=session, user=user, oid=oid)
 
 

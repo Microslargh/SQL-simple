@@ -80,6 +80,9 @@ async def callback(
                 # 如果user不是UserInfoDTO类型，尝试转换
                 user = UserInfoDTO.model_validate(user)
             
+            # 记录用户信息，用于调试
+            SQLBotLogUtil.info(f"User info before token generation: id={user.id}, account={user.account}, weight={user.weight}, isAdmin={user.isAdmin}")
+            
             # 4. 使用account作为key缓存access_token（用于后续登出）
             user_account = user.account
             await cache_oauth2_access_token(user_account, access_token, expire=3600)
@@ -89,6 +92,7 @@ async def callback(
             access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
             # 转换为字典用于生成token
             user_dict = user.model_dump()
+            SQLBotLogUtil.info(f"Token payload: weight={user_dict.get('weight')}, isAdmin={user_dict.get('isAdmin')}")
             system_token = create_access_token(
                 user_dict, expires_delta=access_token_expires
             )

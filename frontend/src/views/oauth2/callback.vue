@@ -26,10 +26,31 @@ onMounted(async () => {
   
   if (!token) {
     ElMessage.error('未获取到登录令牌')
-    loadingText.value = '登录失败，正在跳转到登录页...'
-    setTimeout(() => {
-      router.push('/login')
-    }, 2000)
+    loadingText.value = '登录失败：未获取到登录令牌'
+    
+    // 检查 OAuth2 是否开启，决定跳转位置
+    try {
+      const { getOAuth2Config, redirectToOAuth2Login } = await import('@/utils/oauth2')
+      const oauth2Config = await getOAuth2Config()
+      
+      if (oauth2Config?.enabled) {
+        // 生产环境：OAuth2 已开启，显示错误信息后重定向到 OAuth2
+        setTimeout(() => {
+          redirectToOAuth2Login()
+        }, 3000)
+      } else {
+        // 开发环境：OAuth2 未开启，跳转到登录页
+        setTimeout(() => {
+          router.push('/login')
+        }, 2000)
+      }
+    } catch (error) {
+      console.error('Failed to handle login error:', error)
+      // 出错时跳转到首页
+      setTimeout(() => {
+        router.push('/')
+      }, 2000)
+    }
     return
   }
   
@@ -63,11 +84,33 @@ onMounted(async () => {
       status: error?.response?.status,
       data: error?.response?.data
     })
-    ElMessage.error('登录失败: ' + (error?.message || error?.response?.data?.msg || '未知错误'))
-    loadingText.value = '登录失败，正在跳转到登录页...'
-    setTimeout(() => {
-      router.push('/login')
-    }, 2000)
+    const errorMessage = error?.message || error?.response?.data?.msg || '未知错误'
+    ElMessage.error('登录失败: ' + errorMessage)
+    loadingText.value = `登录失败: ${errorMessage}`
+    
+    // 检查 OAuth2 是否开启，决定跳转位置
+    try {
+      const { getOAuth2Config, redirectToOAuth2Login } = await import('@/utils/oauth2')
+      const oauth2Config = await getOAuth2Config()
+      
+      if (oauth2Config?.enabled) {
+        // 生产环境：OAuth2 已开启，显示错误信息后重定向到 OAuth2
+        setTimeout(() => {
+          redirectToOAuth2Login()
+        }, 3000)
+      } else {
+        // 开发环境：OAuth2 未开启，跳转到登录页
+        setTimeout(() => {
+          router.push('/login')
+        }, 2000)
+      }
+    } catch (e) {
+      console.error('Failed to handle login error:', e)
+      // 出错时跳转到首页
+      setTimeout(() => {
+        router.push('/')
+      }, 2000)
+    }
   }
 })
 </script>

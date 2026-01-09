@@ -16,7 +16,7 @@ export const watchRouter = (router: Router) => {
     await appearanceStore.setAppearance()
     LicenseGenerator.generateRouters(router)
     
-    // 检查 URL 参数中是否有 token（用于 autoLogin 跳转）
+    // 检查 URL 参数中是否有 token（用于 autoLogin 跳转和 OAuth2 callback）
     if (to.query.token) {
       const urlToken = to.query.token as string
       console.log('Token found in URL, saving to cache')
@@ -27,17 +27,56 @@ export const watchRouter = (router: Router) => {
       } catch(e) {
         console.warn('Failed to save token to localStorage:', e)
       }
-      // 移除 URL 中的 token 参数，避免泄露
+      
+      // 如果是 OAuth2 callback 页面，不要移除 token，让 callback 页面处理
+      if (to.path === '/oauth2/callback') {
+        // OAuth2 callback 页面需要 token 参数，不要移除
+        next()
+        return
+      }
+      
+      // 其他页面：移除 URL 中的 token 参数，避免泄露
       const newQuery = { ...to.query }
       delete newQuery.token
       next({ path: to.path, query: newQuery, replace: true })
       return
     }
     
-    if (to.path.startsWith('/login') && userStore.getUid) {
-      next('/')
-      return
+    // 检查 OAuth2 是否开启（用于判断是否屏蔽 login 页面）
+    let oauth2Enabled = false
+    try {
+      const { getOAuth2Config } = await import('@/utils/oauth2')
+      const oauth2Config = await getOAuth2Config()
+      oauth2Enabled = oauth2Config?.enabled || false
+    } catch (error) {
+      console.warn('Failed to get OAuth2 config:', error)
     }
+    
+    // 如果 OAuth2 已开启，屏蔽 login 页面，直接重定向到 OAuth2
+    if (to.path.startsWith('/login')) {
+      if (oauth2Enabled) {
+        // 生产环境：OAuth2 已开启，屏蔽 login 页面，重定向到 OAuth2
+        console.log('OAuth2 is enabled, redirecting from login page to OAuth2')
+        try {
+          const { redirectToOAuth2Login } = await import('@/utils/oauth2')
+          await redirectToOAuth2Login()
+          return
+        } catch (error) {
+          console.error('Failed to redirect to OAuth2:', error)
+          // 如果重定向失败，跳转到首页（会触发 OAuth2 登录）
+          next('/')
+          return
+        }
+      } else {
+        // 开发环境：OAuth2 未开启，允许访问 login 页面
+        if (userStore.getUid) {
+          next('/')
+          return
+        }
+        // 继续到 login 页面
+      }
+    }
+    
     if (assistantWhiteList.includes(to.path)) {
       next()
       return
@@ -53,38 +92,32 @@ export const watchRouter = (router: Router) => {
       }
     }
     
+    // 如果访问 login 页面且 OAuth2 未开启，允许访问
     if (whiteList.includes(to.path)) {
       next()
       return
     }
     if (!token) {
-      // 如果是访问首页且未登录，检查 OAuth2 是否开启
-      if (to.path === '/') {
+      // 未登录情况，检查 OAuth2 是否开启
+      if (oauth2Enabled) {
+        // OAuth2 已开启，跳转到 OAuth2 认证地址
+        console.log('OAuth2 is enabled, redirecting to OAuth2 login')
         try {
-          const { getOAuth2Config, redirectToOAuth2Login } = await import('@/utils/oauth2')
-          const oauth2Config = await getOAuth2Config()
-
-          if (oauth2Config?.enabled) {
-            // OAuth2 已开启，跳转到 OAuth2 认证地址
-            console.log('OAuth2 is enabled, redirecting to OAuth2 login')
-            await redirectToOAuth2Login()
-            return
-          } else {
-            // OAuth2 未开启，跳转到登录页
-            console.log('OAuth2 is not enabled, redirecting to login page')
-            next('/login')
-            return
-          }
+          const { redirectToOAuth2Login } = await import('@/utils/oauth2')
+          await redirectToOAuth2Login()
+          return
         } catch (error) {
-          console.error('Error checking OAuth2 config:', error)
-          // 出错时默认跳转到登录页
-          next('/login')
+          console.error('Error redirecting to OAuth2:', error)
+          // 如果重定向失败，跳转到首页（会触发 OAuth2 登录）
+          next('/')
           return
         }
+      } else {
+        // OAuth2 未开启，跳转到登录页（支持多种登录方式：账密登录、OAuth2、钉钉登录）
+        console.log('OAuth2 is not enabled, redirecting to login page')
+        next('/login')
+        return
       }
-      // 其他未登录情况，跳转到登录页（支持多种登录方式：账密登录、OAuth2、钉钉登录）
-      next('/login')
-      return
     }
     
     // 检查 localStorage 中的 token 和 userStore 中的 token 是否一致
@@ -101,18 +134,31 @@ export const watchRouter = (router: Router) => {
     
     // 确保用户信息已加载（无论是否有 uid，都重新加载一次以确保权限信息是最新的）
     // 如果 token 不一致，也需要重新加载用户信息
-    if (!userStore.getUid || userStore.getWeight === undefined || userStore.getWeight === 0 || tokenMismatch) {
+    // 注意：weight === 0 是合法的普通用户状态，不应该触发重新加载
+    if (!userStore.getUid || userStore.getWeight === undefined || tokenMismatch) {
       try {
         console.log('Loading user info...', { hasUid: !!userStore.getUid, tokenMismatch })
         await userStore.info()
         console.log('User info loaded successfully:', {
           uid: userStore.getUid,
           account: userStore.getAccount,
-          name: userStore.getName
+          name: userStore.getName,
+          weight: userStore.getWeight
         })
       } catch (error) {
         console.error('Failed to load user info:', error)
-        // 如果加载失败，跳转到登录页
+        // 如果加载失败，根据 OAuth2 配置决定跳转
+        try {
+          const { getOAuth2Config, redirectToOAuth2Login } = await import('@/utils/oauth2')
+          const oauth2Config = await getOAuth2Config()
+          if (oauth2Config?.enabled) {
+            await redirectToOAuth2Login()
+            return
+          }
+        } catch (e) {
+          console.error('Failed to redirect to OAuth2:', e)
+        }
+        // OAuth2 未开启或重定向失败，跳转到登录页
         next('/login')
         return
       }
@@ -157,10 +203,15 @@ export const watchRouter = (router: Router) => {
 
 const accessCrossPermission = (to: any) => {
   if (!to?.path) return false
-  return (
-    (to.path.startsWith('/system') && !userStore.isAdmin) ||
-    (to.path.startsWith('/set') && !userStore.isSpaceAdmin)
-  )
+  // 系统管理页面：允许系统管理员和工作空间管理员访问
+  if (to.path.startsWith('/system')) {
+    return !userStore.isAdmin && !userStore.isSpaceAdmin
+  }
+  // 设置页面：只允许工作空间管理员访问
+  if (to.path.startsWith('/set')) {
+    return !userStore.isSpaceAdmin
+  }
+  return false
 }
 const loadXpackStatic = () => {
   if (document.getElementById('sqlbot_xpack_static')) {

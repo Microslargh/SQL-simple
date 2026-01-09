@@ -413,7 +413,6 @@ import { promptApi } from '@/api/prompt2'
 import icon_new_chat_outlined from '@/assets/svg/icon_new_chat_outlined.svg'
 import icon_sidebar_outlined from '@/assets/svg/icon_sidebar_outlined.svg'
 import icon_replace_outlined from '@/assets/svg/icon_replace_outlined.svg'
-import icon_screen_outlined from '@/assets/svg/icon_screen_outlined.svg'
 import icon_start_outlined from '@/assets/svg/icon_start_outlined.svg'
 import logo_fold from '@/assets/svg/logo-custom_small.svg'
 import logo from '@/assets/LOGO.svg'
@@ -881,46 +880,6 @@ function askAgain(message: ChatMessage) {
   nextTick(() => {
     sendMessage()
   })
-}
-
-async function clickAnalysis(id?: number) {
-  const baseRecord = find(currentChat.value.records, (value) => id === value.id)
-  if (baseRecord == undefined) {
-    return
-  }
-
-  loading.value = true
-  isTyping.value = true
-
-  const currentRecord = new ChatRecord()
-  currentRecord.create_time = new Date()
-  currentRecord.chat_id = baseRecord.chat_id
-  currentRecord.question = baseRecord.question
-  currentRecord.chart = baseRecord.chart
-  currentRecord.data = baseRecord.data
-  currentRecord.analysis_record_id = id
-  currentRecord.analysis = ''
-
-  currentChat.value.records.push(currentRecord)
-
-  nextTick(async () => {
-    const index = currentChat.value.records.length - 1
-    if (analysisAnswerRef.value) {
-      if (analysisAnswerRef.value instanceof Array) {
-        for (let i = 0; i < analysisAnswerRef.value.length; i++) {
-          const _index = analysisAnswerRef.value[i].index()
-          if (index === _index) {
-            await analysisAnswerRef.value[i].sendMessage()
-            break
-          }
-        }
-      } else {
-        await analysisAnswerRef.value.sendMessage()
-      }
-    }
-  })
-
-  return
 }
 
 const predictAnswerRef = ref()

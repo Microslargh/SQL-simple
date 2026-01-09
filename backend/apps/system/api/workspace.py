@@ -84,12 +84,24 @@ async def pager(
     keyword: Optional[str] = Query(None, description="搜索关键字(可选)"),
     oid: Optional[int] = Query(None, description="空间ID(仅admin用户生效)"),
 ):
-    if not current_user.isAdmin and current_user.weight == 0:
-        raise Exception(trans('i18n_permission.no_permission', url = '', msg = ''))
+    # 系统管理员可以访问所有工作空间
     if current_user.isAdmin:
         workspace_id = oid if oid else current_user.oid
     else:
+        # 非系统管理员：只能访问自己所在的工作空间，忽略 oid 参数
         workspace_id = current_user.oid
+        
+        # 检查用户是否在该工作空间中，并且是该工作空间的管理员
+        user_ws = session.exec(
+            select(UserWsModel).where(
+                UserWsModel.uid == current_user.id,
+                UserWsModel.oid == workspace_id,
+                UserWsModel.weight > 0
+            )
+        ).first()
+        
+        if not user_ws:
+            raise Exception(trans('i18n_permission.no_permission', url = '', msg = ''))
     pagination = PaginationParams(page=pageNum, size=pageSize)
     paginator = Paginator(session)
     stmt = select(UserModel.id, UserModel.account, UserModel.name, UserModel.email, UserModel.status, UserModel.create_time, UserModel.oid, UserWsModel.weight, UserWsModel.datasource_access).join(
@@ -156,9 +168,23 @@ async def create(session: SessionDep, current_user: CurrentUser, trans: Trans, c
     session.commit()
 
 @router.put("/uws")     
-async def edit(session: SessionDep, trans: Trans, editor: UserWsEditor):
+async def edit(session: SessionDep, current_user: CurrentUser, trans: Trans, editor: UserWsEditor):
     if not editor.oid or not editor.uid:
         raise Exception(trans('i18n_miss_args', key = '[oid, uid]'))
+    
+    # 权限检查：只有系统管理员或工作空间管理员可以修改
+    if not current_user.isAdmin:
+        # 检查当前用户是否是目标工作空间的管理员
+        user_ws = session.exec(
+            select(UserWsModel).where(
+                UserWsModel.uid == current_user.id,
+                UserWsModel.oid == editor.oid,
+                UserWsModel.weight > 0
+            )
+        ).first()
+        if not user_ws:
+            raise Exception(trans('i18n_permission.no_permission', url = '', msg = ''))
+    
     db_model = session.exec(select(UserWsModel).where(UserWsModel.uid == editor.uid, UserWsModel.oid == editor.oid)).first()
     if not db_model:
         raise HTTPException("uws not exist")

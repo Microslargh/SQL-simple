@@ -639,10 +639,11 @@ async def create_or_get_user(userinfo: dict, session: Session) -> UserInfoDTO:
             session.add(db_user)
             session.commit()
             session.refresh(db_user)
-            
-            # 清除用户缓存
-            await clean_user_cache(db_user.id)
-            SQLBotLogUtil.info(f"User info updated and cache cleared for user: {account}")
+            SQLBotLogUtil.info(f"User info updated for user: {account}")
+        
+        # 无论是否有更新，都清除用户缓存，确保获取最新的用户信息（包括 weight 等权限信息）
+        await clean_user_cache(db_user.id)
+        SQLBotLogUtil.info(f"User cache cleared for user: {account}")
         
         # 获取更新后的用户信息
         user = await get_user_info(session=session, user_id=db_user.id)

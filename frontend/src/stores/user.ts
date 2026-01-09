@@ -64,8 +64,9 @@ export const UserStore = defineStore('user', {
       return this.time
     },
     isAdmin(): boolean {
-      // 优先使用后端返回的 isAdmin 字段，如果没有则使用 weight === 1 判断
-      return this._isAdminFlag !== undefined && this._isAdminFlag !== false ? this._isAdminFlag : this.weight === 1
+      // 只使用后端返回的 isAdmin 字段，不依赖 weight
+      // 系统管理员必须是 id == 1 && account == 'admin'
+      return this._isAdminFlag === true
     },
     getWeight(): number {
       return this.weight

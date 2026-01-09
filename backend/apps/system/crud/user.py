@@ -29,11 +29,22 @@ async def get_user_info(*, session: Session, user_id: int) -> UserInfoDTO | None
     if not db_user:
         return None
     userInfo = UserInfoDTO.model_validate(db_user.model_dump())
-    userInfo.isAdmin = userInfo.id == 1 and userInfo.account == 'admin'
-    if userInfo.isAdmin:
-        return userInfo
-    ws_model: UserWsModel = session.exec(select(UserWsModel).where(UserWsModel.uid == userInfo.id, UserWsModel.oid == userInfo.oid)).first()
-    userInfo.weight = ws_model.weight if ws_model else -1
+    
+    # 获取用户在所有工作空间中的最大 weight，用于判断是否是工作空间管理员
+    max_weight_result = session.exec(
+        select(func.max(UserWsModel.weight)).where(UserWsModel.uid == userInfo.id)
+    ).first()
+    # 如果用户在任何工作空间中是管理员（weight > 0），返回最大 weight
+    # 否则返回 0（普通成员）
+    userInfo.weight = max_weight_result if max_weight_result is not None else 0
+    SQLBotLogUtil.debug(f"User {userInfo.id} ({userInfo.account}) weight: {userInfo.weight} (max_weight_result: {max_weight_result})")
+    
+    # 系统管理员判断逻辑：
+    # 1. 传统的系统管理员：id == 1 && account == 'admin'（用于测试环境）
+    # 2. 工作空间管理员：weight > 0（用于生产环境，OAuth2 认证用户）
+    # 在生产环境中，工作空间管理员也被视为系统管理员，可以访问所有系统管理功能
+    userInfo.isAdmin = (userInfo.id == 1 and userInfo.account == 'admin') or (userInfo.weight > 0)
+    
     return userInfo
 
 def authenticate(*, session: Session, account: str, password: str) -> BaseUserDTO | None:
@@ -69,9 +80,44 @@ async def single_delete(session: SessionDep, id: int):
     session.delete(user_model)
     session.commit()
 
-@clear_cache(namespace=CacheNamespace.AUTH_INFO, cacheName=CacheName.USER_INFO, keyExpression="id")    
 async def clean_user_cache(id: int):
-    SQLBotLogUtil.info(f"User cache for [{id}] has been cleaned")
+    """
+    清除用户信息缓存
+    注意：get_user_info 的 keyExpression 是 "user_id"，所以缓存 key 是 AUTH_INFO:USER_INFO:{user_id}
+    这里需要手动构建相同的 key 来清除缓存
+    """
+    from common.core.config import settings
+    from common.core.sqlbot_cache import is_cache_initialized
+    from fastapi_cache import FastAPICache
+    
+    if not settings.CACHE_TYPE or settings.CACHE_TYPE.lower() == "none" or not is_cache_initialized():
+        SQLBotLogUtil.info(f"Cache not enabled or not initialized, skipping cache clear for user [{id}]")
+        return
+    
+    try:
+        namespace = str(CacheNamespace.AUTH_INFO)
+        cache_name = str(CacheName.USER_INFO)
+        # 构建与 get_user_info 相同的缓存 key
+        cache_key = f"{namespace}:{cache_name}:{id}"
+        
+        backend = FastAPICache.get_backend()
+        if settings.CACHE_TYPE.lower() == "redis":
+            redis = backend.redis
+            # Redis 的 delete 方法不会抛出异常，即使 key 不存在
+            result = await redis.delete(cache_key)
+            if result:
+                SQLBotLogUtil.info(f"User cache cleared (Redis): {cache_key}")
+            else:
+                SQLBotLogUtil.debug(f"User cache key not found (Redis): {cache_key}")
+        else:
+            # 内存缓存：先检查 key 是否存在，再删除
+            if await backend.get(cache_key):
+                await backend.clear(key=cache_key)
+                SQLBotLogUtil.info(f"User cache cleared (Memory): {cache_key}")
+            else:
+                SQLBotLogUtil.debug(f"User cache key not found (Memory): {cache_key}")
+    except Exception as e:
+        SQLBotLogUtil.exception(f"Failed to clear user cache for [{id}]: {str(e)}")
 
 
 def check_account_exists(*, session: Session, account: str) -> bool:

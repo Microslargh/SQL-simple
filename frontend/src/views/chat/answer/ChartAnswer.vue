@@ -101,9 +101,9 @@ const stepOrder = [
   'table-retrieval',
   'sql-generation',
   'sql-execution',
-  'data-analysis',
   'chart-generation',
   'result-display',
+  'data-analysis',
 ]
 
 // 获取有序的步骤列表
@@ -267,6 +267,10 @@ const sendMessage = async () => {
                 break
               case 'chart':
                 _currentChat.value.records[index.value].chart = data.content
+                // 图表数据已设置，立即触发数据获取以显示图表
+                if (_currentChat.value.records[index.value].id) {
+                  getChatData(_currentChat.value.records[index.value].id)
+                }
                 break
               case 'analysis-result':
                 analysis_answer += data.content
@@ -364,11 +368,12 @@ const ArrowDownF = () => {
         />
       </div>
     </div>
-    <!-- 显示分析结果（如果有） -->
+    <!-- 先显示图表 -->
+    <ChartBlock style="margin-top: 6px" :message="message" />
+    <!-- 再显示分析结果（如果有） -->
     <div v-if="message?.record?.analysis" style="margin-top: 12px; margin-bottom: 12px">
       <MdComponent :message="message.record.analysis" />
     </div>
-    <ChartBlock style="margin-top: 6px" :message="message" />
     <slot></slot>
     <template #tool>
       <slot name="tool"></slot>

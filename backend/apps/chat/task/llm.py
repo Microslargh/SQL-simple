@@ -265,14 +265,14 @@ class LLMService:
         return fields
 
     def generate_analysis(self):
-        # 尝试从图表配置获取字段，如果图表还未生成，则从SQL执行结果获取
+        # 优先从图表配置获取字段（图表已在分析之前生成）
         try:
             fields = self.get_fields_from_chart()
             # 如果图表配置存在但字段为空，尝试从SQL结果获取
             if not fields:
                 fields = self.get_fields_from_sql_result()
         except Exception:
-            # 如果图表配置不存在（图表还未生成），从SQL执行结果获取字段
+            # 如果图表配置获取失败，从SQL执行结果获取字段
             fields = self.get_fields_from_sql_result()
         
         self.chat_question.fields = orjson.dumps(fields).decode()
@@ -639,23 +639,59 @@ class LLMService:
 
         straight_dict_text = straight_dict_text.strip().strip("```").strip("json")
         straight_dict = json.loads(straight_dict_text)
-        if "matched_id" not in straight_dict:
+        if "matched_id" not in straight_dict or straight_dict["matched_id"] is None:
             raise SingleMessageError(orjson.dumps({'message': 'match id not in response'}).decode())
-        if int(straight_dict["matched_id"]) not in [int(i["id"]) for i in training_data] :
+        
+        matched_id = straight_dict["matched_id"]
+        if matched_id is None:
+            raise SingleMessageError(orjson.dumps({'message': 'match id is None'}).decode())
+        
+        try:
+            matched_id_int = int(matched_id)
+        except (ValueError, TypeError):
+            raise SingleMessageError(orjson.dumps({'message': f'invalid match id: {matched_id}'}).decode())
+        
+        # 检查 training_data 中的 id 是否有效
+        valid_training_ids = []
+        for i in training_data:
+            if i.get("id") is not None:
+                try:
+                    valid_training_ids.append(int(i["id"]))
+                except (ValueError, TypeError):
+                    continue
+        
+        if matched_id_int not in valid_training_ids:
             raise SingleMessageError(orjson.dumps({'message': 'match id not in response'}).decode())
 
         matched_data = {}
         for i in training_data:
-            if int(straight_dict["matched_id"]) == int(i["id"]):
-                matched_data = i
+            if i.get("id") is not None:
+                try:
+                    if matched_id_int == int(i["id"]):
+                        matched_data = i
+                        break
+                except (ValueError, TypeError):
+                    continue
 
+        # 如果没有找到匹配的数据，抛出异常以便回退到正常SQL生成
+        if not matched_data:
+            raise SingleMessageError(orjson.dumps({'message': 'match id not in training data'}).decode())
 
         # _async_log_util.info(f"straight_text: {matched_data}")
         #
-        constructed_sql = matched_data["sql-template"]
-        default_kv = matched_data["sql-info"]
-        tables_str = matched_data["tables"]
-        update_kv = straight_dict["infos"]
+        constructed_sql = matched_data.get("sql-template")
+        default_kv = matched_data.get("sql-info")
+        tables_str = matched_data.get("tables")
+        
+        # 检查必要字段是否存在
+        if not constructed_sql:
+            raise SingleMessageError(orjson.dumps({'message': 'sql-template not found in matched data'}).decode())
+        if not default_kv:
+            raise SingleMessageError(orjson.dumps({'message': 'sql-info not found in matched data'}).decode())
+        if not tables_str:
+            raise SingleMessageError(orjson.dumps({'message': 'tables not found in matched data'}).decode())
+        
+        update_kv = straight_dict.get("infos", {})
         tables = [i.strip().strip("'").strip('"') for i in tables_str.split(",")]
         if isinstance(default_kv, str):
             default_kv = json.loads(default_kv)
@@ -1220,15 +1256,23 @@ class LLMService:
             status, matched_id, infos = self.check_straight_sql(full_straight_sql_text)
             chart_type = ""
             if status:
-                full_sql_text = self.generate_straight_sql(training_data, full_straight_sql_text)
-                if in_chat:
-                    yield 'data:' + orjson.dumps({
-                        'type': 'step-start',
-                        'step': 'sql-generation',
-                        'step_name': '快速模板',
-                        'description': '找到快速模板'
-                    }).decode() + '\n\n'
-            else:
+                # 尝试使用快速模板，如果失败则回退到正常SQL生成
+                try:
+                    full_sql_text = self.generate_straight_sql(training_data, full_straight_sql_text)
+                    if in_chat:
+                        yield 'data:' + orjson.dumps({
+                            'type': 'step-start',
+                            'step': 'sql-generation',
+                            'step_name': '快速模板',
+                            'description': '找到快速模板'
+                        }).decode() + '\n\n'
+                except Exception as e:
+                    # 快速模板失败，回退到正常SQL生成
+                    if settings.LOG_LEVEL == "DEBUG":
+                        _async_log_util.warning(f"快速模板匹配失败，回退到正常SQL生成: {str(e)}")
+                    status = False  # 标记为失败，继续执行正常SQL生成流程
+            
+            if not status:
                 # generate sql
                 sql_res = self.generate_sql()
                 full_sql_text = ''
@@ -1377,40 +1421,7 @@ class LLMService:
                     yield json_result
                 return
 
-            # 步骤7：数据分析（在图表生成之前）
-            if in_chat:
-                yield 'data:' + orjson.dumps({
-                    'type': 'step-start',
-                    'step': 'data-analysis',
-                    'step_name': '数据分析',
-                    'description': '正在分析数据...'
-                }).decode() + '\n\n'
-            
-            # 生成文字分析（基于SQL执行结果）
-            analysis_res = self.generate_analysis()
-            full_analysis_text = ''
-            full_analysis_thinking = ''
-            for chunk in analysis_res:
-                if chunk.get('content'):
-                    full_analysis_text += chunk.get('content')
-                if chunk.get('reasoning_content'):
-                    full_analysis_thinking += chunk.get('reasoning_content')
-                if in_chat:
-                    yield 'data:' + orjson.dumps(
-                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
-                         'type': 'analysis-result'}).decode() + '\n\n'
-            
-            # 数据分析完成
-            if in_chat:
-                yield 'data:' + orjson.dumps({
-                    'type': 'step-complete',
-                    'step': 'data-analysis',
-                    'step_name': '数据分析',
-                    'description': '数据分析已完成'
-                }).decode() + '\n\n'
-                yield 'data:' + orjson.dumps({'type': 'analysis_finish'}).decode() + '\n\n'
-
-            # 步骤8：图表生成（在数据分析之后）
+            # 步骤7：图表生成（在数据分析之前）
             if in_chat:
                 yield 'data:' + orjson.dumps({
                     'type': 'step-start',
@@ -1456,7 +1467,7 @@ class LLMService:
                 yield 'data:' + orjson.dumps(
                     {'content': orjson.dumps(chart).decode(), 'type': 'chart'}).decode() + '\n\n'
                 
-                # 步骤9：结果展示
+                # 步骤8：结果展示（在图表生成之后）
                 # data_count在SQL执行步骤中已定义
                 chart_type_name = {'table': '表格', 'bar': '柱状图', 'line': '折线图', 'pie': '饼图'}.get(chart.get('type', 'table'), '图表')
                 yield 'data:' + orjson.dumps({
@@ -1469,6 +1480,39 @@ class LLMService:
                         'data_rows': data_count
                     }
                 }).decode() + '\n\n'
+
+            # 步骤9：数据分析（在结果展示之后）
+            if in_chat:
+                yield 'data:' + orjson.dumps({
+                    'type': 'step-start',
+                    'step': 'data-analysis',
+                    'step_name': '数据分析',
+                    'description': '正在分析数据...'
+                }).decode() + '\n\n'
+            
+            # 生成文字分析（基于图表配置和SQL执行结果）
+            analysis_res = self.generate_analysis()
+            full_analysis_text = ''
+            full_analysis_thinking = ''
+            for chunk in analysis_res:
+                if chunk.get('content'):
+                    full_analysis_text += chunk.get('content')
+                if chunk.get('reasoning_content'):
+                    full_analysis_thinking += chunk.get('reasoning_content')
+                if in_chat:
+                    yield 'data:' + orjson.dumps(
+                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
+                         'type': 'analysis-result'}).decode() + '\n\n'
+            
+            # 数据分析完成
+            if in_chat:
+                yield 'data:' + orjson.dumps({
+                    'type': 'step-complete',
+                    'step': 'data-analysis',
+                    'step_name': '数据分析',
+                    'description': '数据分析已完成'
+                }).decode() + '\n\n'
+                yield 'data:' + orjson.dumps({'type': 'analysis_finish'}).decode() + '\n\n'
             else:
                 if stream:
                     data = []

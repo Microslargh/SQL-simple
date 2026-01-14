@@ -379,7 +379,6 @@ defineExpose({
 <template>
   <div
     v-if="
-      !message.isTyping &&
       ((!isPredict && (message?.record?.sql || message?.record?.chart)) ||
         (isPredict && message?.record?.chart && data.length > 0))
     "

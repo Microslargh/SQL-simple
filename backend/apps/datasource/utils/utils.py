@@ -17,7 +17,7 @@ def load_aes_key() -> bytes:
     - 直接 16/24/32 长度的明文字符串（自动转 utf-8 bytes，推荐）
     - 也兼容 Base64 编码的密钥
     """
-    raw = settings.AES_S_K
+    raw = settings.AS_S_K
     if not raw:
         raise ValueError("AES secret key not configured")
 

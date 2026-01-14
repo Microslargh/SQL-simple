@@ -75,6 +75,7 @@ class LLMService:
     config: LLMConfig
     llm: BaseChatModel
     sql_message: List[Union[BaseMessage, dict[str, Any]]] = []
+    straight_messages: List[Union[BaseMessage, dict[str, Any]]] = []
     chart_message: List[Union[BaseMessage, dict[str, Any]]] = []
 
     session: Session = db_session
@@ -218,6 +219,12 @@ class LLMService:
                 elif last_chart_message.get('type') == 'ai':
                     _msg = AIMessage(content=last_chart_message.get('content'))
                     self.chart_message.append(_msg)
+
+    def init_straight_messages(self):
+        self.straight_messages = []
+        # add straight prompt
+        self.straight_messages.append(SystemMessage(content=self.chat_question.sql_straight_question()))
+
 
     def init_record(self) -> ChatRecord:
         self.record = save_question(session=self.session, current_user=self.current_user, question=self.chat_question)
@@ -605,6 +612,73 @@ class LLMService:
                                       answer=orjson.dumps({'content': full_sql_text}).decode(),
                                       current_user=self.current_user)
 
+    def generate_straight_sql_info(self):
+        self.straight_messages.append(HumanMessage(
+            self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
+
+        if settings.LOG_LEVEL == "DEBUG":
+            _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
+            _async_log_util.info(f"datasource-result: {self.straight_messages}")
+            _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
+
+
+        token_usage = {}
+        res = process_stream(self.llm.stream(self.straight_messages), token_usage)
+        for chunk in res:
+
+            yield chunk
+
+
+    @staticmethod
+    def generate_straight_sql(training_data, straight_dict_text):
+        if settings.LOG_LEVEL == "DEBUG":
+            _async_log_util.info("="*20 +" generate_straight_sql " + "="*20 + "\n")
+            # _async_log_util.info(f"training_data: {training_data}")
+            # _async_log_util.info(f"straight_text: {straight_dict_text}")
+
+
+        straight_dict_text = straight_dict_text.strip().strip("```").strip("json")
+        straight_dict = json.loads(straight_dict_text)
+        if "matched_id" not in straight_dict:
+            raise SingleMessageError(orjson.dumps({'message': 'match id not in response'}).decode())
+        if int(straight_dict["matched_id"]) not in [int(i["id"]) for i in training_data] :
+            raise SingleMessageError(orjson.dumps({'message': 'match id not in response'}).decode())
+
+        matched_data = {}
+        for i in training_data:
+            if int(straight_dict["matched_id"]) == int(i["id"]):
+                matched_data = i
+
+
+        # _async_log_util.info(f"straight_text: {matched_data}")
+        #
+        constructed_sql = matched_data["sql-template"]
+        default_kv = matched_data["sql-info"]
+        tables_str = matched_data["tables"]
+        update_kv = straight_dict["infos"]
+        tables = [i.strip().strip("'").strip('"') for i in tables_str.split(",")]
+        if isinstance(default_kv, str):
+            default_kv = json.loads(default_kv)
+        for k, v in default_kv.items():
+            if k in update_kv:
+                v = update_kv[k]
+            constructed_sql = constructed_sql.replace("[[%s]]" % k, v)
+
+        _async_log_util.info(f"constructed_sql: {constructed_sql}")
+        sql_result = {
+            "success": True,
+            "sql": constructed_sql,
+            "tables": tables,
+        }
+        sql_result["sql"] = sql_result["sql"].replace("\n", " ")
+
+        # _async_log_util.info(f"straight_text: {default_kv}")
+        # _async_log_util.info(f"straight_text: {update_kv}")
+
+        _async_log_util.info("=" * 20 + " generate_straight_sql " + "=" * 20 + "\n")
+        return json.dumps(sql_result)
+
+
     def generate_with_sub_sql(self, sql, sub_mappings: list):
         sub_query = json.dumps(sub_mappings, ensure_ascii=False)
         self.chat_question.sql = sql
@@ -790,6 +864,36 @@ class LLMService:
             raise SingleMessageError("SQL query is empty")
         return sql, data.get('tables')
 
+
+    @staticmethod
+    def check_straight_sql(res: str) -> tuple[bool, str, str]:
+        status = False
+        infos = None
+        matched_id = None
+        json_str = extract_nested_json(res)
+        if json_str is None:
+            raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
+                                                   'traceback': "Cannot parse sql from answer:\n" + res}).decode())
+        try:
+            data = orjson.loads(json_str)
+
+            if "success" not in data or not data['success'] or str(data['success']).lower() == "false":
+                return False, "", ""
+            else:
+                matched_id = data["matched_id"]
+                infos = data['infos']
+                status = True
+
+        except SingleMessageError as e:
+            raise e
+        except Exception:
+            raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
+                                                   'traceback': "Cannot parse sql from answer:\n" + res}).decode())
+
+        if str(infos).strip() == '':
+            raise SingleMessageError("SQL query is empty")
+        return status, matched_id, infos
+
     @staticmethod
     def get_chart_type_from_sql_answer(res: str) -> Optional[str]:
         json_str = extract_nested_json(res)
@@ -953,6 +1057,7 @@ class LLMService:
                  finish_step: ChatFinishStep = ChatFinishStep.GENERATE_CHART):
         json_result: Dict[str, Any] = {'success': True}
         try:
+            training_data = []
             if self.ds:
                 oid = self.ds.oid if isinstance(self.ds, CoreDatasource) else 1
                 ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
@@ -1001,8 +1106,7 @@ class LLMService:
                         'description': '正在检索相似SQL示例...'
                     }).decode() + '\n\n'
                 
-                training_template, training_data = get_training_template_with_data(
-                    self.session, self.chat_question.question, ds_id, oid)
+                training_template, sql_info_templates, training_data = get_training_template_with_data(self.session, self.chat_question.question, ds_id, oid)
                 self.chat_question.data_training = training_template
                 
                 if in_chat:
@@ -1022,6 +1126,7 @@ class LLMService:
                                                                        oid, ds_id)
 
             self.init_messages()
+            self.init_straight_messages()
 
             # return id
             if in_chat:
@@ -1099,22 +1204,49 @@ class LLMService:
                     'step_name': 'SQL生成',
                     'description': '正在生成SQL语句...'
                 }).decode() + '\n\n'
-            
-            # generate sql
-            sql_res = self.generate_sql()
-            full_sql_text = ''
-            for chunk in sql_res:
-                full_sql_text += chunk.get('content')
-                if in_chat:
-                    yield 'data:' + orjson.dumps(
-                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
-                         'type': 'sql-result'}).decode() + '\n\n'
-            # filter sql
-            # 优化：只在DEBUG模式下记录完整SQL文本
-            if settings.LOG_LEVEL == "DEBUG":
-                _async_log_util.info(full_sql_text)
 
-            chart_type = self.get_chart_type_from_sql_answer(full_sql_text)
+            straight_sql_res = self.generate_straight_sql_info()
+            # if settings.LOG_LEVEL == "DEBUG":
+            #     _async_log_util.info("DEBUG " * 100)
+            #     _async_log_util.info(self.straight_messages)
+            #     for i in straight_sql_res:
+            #         _async_log_util.info(i)
+            full_straight_sql_text = ''
+            for chunk in straight_sql_res:
+                full_straight_sql_text += chunk.get('content')
+            # if settings.LOG_LEVEL == "DEBUG":
+            #     _async_log_util.info("DEBUG " * 100)
+            #     _async_log_util.info(full_straight_sql_text)
+            status, matched_id, infos = self.check_straight_sql(full_straight_sql_text)
+            chart_type = ""
+            if status:
+                full_sql_text = self.generate_straight_sql(training_data, full_straight_sql_text)
+                if in_chat:
+                    yield 'data:' + orjson.dumps({
+                        'type': 'step-start',
+                        'step': 'sql-generation',
+                        'step_name': '快速模板',
+                        'description': '找到快速模板'
+                    }).decode() + '\n\n'
+            else:
+                # generate sql
+                sql_res = self.generate_sql()
+                full_sql_text = ''
+                for chunk in sql_res:
+                    full_sql_text += chunk.get('content')
+                    if in_chat:
+                        yield 'data:' + orjson.dumps(
+                            {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
+                             'type': 'sql-result'}).decode() + '\n\n'
+                # filter sql
+                # 优化：只在DEBUG模式下记录完整SQL文本
+                chart_type = self.get_chart_type_from_sql_answer(full_sql_text)
+
+            # if settings.LOG_LEVEL == "DEBUG":
+            #     _async_log_util.info("DEBUG " * 100)
+            #     _async_log_util.info(status)
+            #     _async_log_util.info(full_sql_text)
+
 
             use_dynamic_ds: bool = self.current_assistant and self.current_assistant.type in dynamic_ds_types
             is_page_embedded: bool = self.current_assistant and self.current_assistant.type == 4

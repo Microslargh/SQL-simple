@@ -221,6 +221,9 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
         select(
             DataTraining.id,
             DataTraining.question,
+            DataTraining.sql_template,
+            DataTraining.template_k,
+            DataTraining.tables,
         )
         .where(
             and_(or_(text(":sentence ILIKE '%' || question || '%'"), text("question ILIKE '%' || :sentence || '%'")),
@@ -261,11 +264,18 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
         return []
 
     t_list = session.query(DataTraining.id, DataTraining.datasource, DataTraining.question,
-                           DataTraining.description).filter(
+                           DataTraining.description, DataTraining.sql_template, DataTraining.template_k, DataTraining.tables).filter(
         and_(DataTraining.id.in_(_ids))).all()
 
     for row in t_list:
-        _map[row.id] = {'question': row.question, 'suggestion-answer': row.description}
+        _map[row.id] = {
+            'id': row.id,
+            'question': row.question,
+            'suggestion-answer': row.description,
+            'sql-template': row.sql_template,
+            'sql-info': row.template_k,
+            'tables': row.tables,
+        }
 
     _results: list[dict] = []
     for key in _map.keys():
@@ -274,16 +284,33 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
     return _results
 
 
-def to_xml_string(_dict: list[dict] | dict, root: str = 'sql-examples') -> str:
-    item_name_func = lambda x: 'sql-example' if x == 'sql-examples' else 'item'
+def to_xml_string(_dict: list[dict] | dict, root: str = 'sql-examples', need_template=None) -> str:
+
     dicttoxml.LOG.setLevel(logging.ERROR)
-    xml = dicttoxml.dicttoxml(_dict,
-                              cdata=['question', 'suggestion-answer'],
-                              custom_root=root,
-                              item_func=item_name_func,
-                              xml_declaration=False,
-                              encoding='utf-8',
-                              attr_type=False).decode('utf-8')
+    if not need_template:
+        item_name_func = lambda x: 'sql-example' if x == 'sql-examples' else 'item'
+        xml = dicttoxml.dicttoxml(_dict,
+                                  cdata=['question', 'suggestion-answer'],
+                                  custom_root=root,
+                                  item_func=item_name_func,
+                                  xml_declaration=False,
+                                  encoding='utf-8',
+                                  attr_type=False).decode('utf-8')
+    else:
+        item_name_func = lambda x: 'sql-info-template'
+        xml = dicttoxml.dicttoxml(_dict,
+                                  cdata=[
+                                      'id',
+                                      'question',
+                                      'sql-template',
+                                      'sql-info',
+                                      'tables'
+                                  ],
+                                  custom_root="sql-info-templates",
+                                  item_func=item_name_func,
+                                  xml_declaration=False,
+                                  encoding='utf-8',
+                                  attr_type=False).decode('utf-8')
     pretty_xml = parseString(xml).toprettyxml()
 
     if pretty_xml.startswith('<?xml'):
@@ -318,7 +345,7 @@ def get_training_template(session: SessionDep, question: str, datasource: int, o
         return ''
 
 
-def get_training_template_with_data(session: SessionDep, question: str, datasource: int, oid: Optional[int] = 1) -> tuple[str, List[dict]]:
+def get_training_template_with_data(session: SessionDep, question: str, datasource: int, oid: Optional[int] = 1) -> tuple[str, str, List[dict]]:
     """
     获取训练数据模板和原始数据
     Returns:
@@ -327,11 +354,12 @@ def get_training_template_with_data(session: SessionDep, question: str, datasour
     if not oid:
         oid = 1
     if not datasource:
-        return '', []
+        return '', '', []
     _results = select_training_by_question(session, question, oid, datasource)
     if _results and len(_results) > 0:
         data_training = to_xml_string(_results)
+        sql_info_templates = to_xml_string(_results, need_template=True)
         template = get_base_data_training_template().format(data_training=data_training)
-        return template, _results
+        return template, sql_info_templates,_results
     else:
-        return '', []
+        return '', '', [],

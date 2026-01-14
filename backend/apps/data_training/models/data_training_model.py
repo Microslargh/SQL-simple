@@ -15,6 +15,9 @@ class DataTraining(SQLModel, table=True):
     create_time: Optional[datetime] = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
     question: Optional[str] = Field(max_length=255)
     description: Optional[str] = Field(sa_column=Column(Text, nullable=True))
+    sql_template: Optional[str] = Field(sa_column=Column(Text, nullable=True))
+    template_k: Optional[str] = Field(sa_column=Column(Text, nullable=True))
+    tables: Optional[str] = Field(sa_column=Column(Text, nullable=True))
     embedding: Optional[List[float]] = Field(sa_column=Column(VECTOR(), nullable=True))
 
 

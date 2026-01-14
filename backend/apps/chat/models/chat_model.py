@@ -187,6 +187,11 @@ class AiModelQuestion(BaseModel):
                                                    lang=self.lang, terminologies=self.terminologies,
                                                    data_training=self.data_training, custom_prompt=self.custom_prompt)
 
+    def sql_straight_question(self):
+        return get_sql_template()['straight'].format(engine=self.engine, schema=self.db_schema, question=self.question,
+                                                   lang=self.lang, terminologies=self.terminologies,
+                                                   data_training=self.data_training, custom_prompt=self.custom_prompt)
+
     def sql_user_question(self, current_time: str):
         return get_sql_template()['user'].format(engine=self.engine, schema=self.db_schema, question=self.question,
                                                  rule=self.rule, current_time=current_time, error_msg=self.error_msg)

@@ -3,7 +3,7 @@ import json
 from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response, Response
 
 from common.core.config import settings
 from common.utils.utils import SQLBotLogUtil
@@ -37,12 +37,15 @@ class ResponseMiddleware(BaseHTTPMiddleware):
                 async for chunk in response.body_iterator:
                     body += chunk
 
-                raw_data = json.loads(body.decode())
+                raw_data = json.loads(body.decode('utf-8'))
 
                 if isinstance(raw_data, dict) and all(k in raw_data for k in ["code", "data", "msg"]):
-                    return JSONResponse(
-                        content=raw_data,
+                    # 使用 ensure_ascii=False 确保中文字符不被转义为 Unicode 序列
+                    json_str = json.dumps(raw_data, ensure_ascii=False)
+                    return Response(
+                        content=json_str.encode('utf-8'),
                         status_code=response.status_code,
+                        media_type="application/json; charset=utf-8",
                         headers={
                             k: v for k, v in response.headers.items()
                             if k.lower() not in ("content-length", "content-type")
@@ -55,9 +58,12 @@ class ResponseMiddleware(BaseHTTPMiddleware):
                     "msg": None
                 }
 
-                return JSONResponse(
-                    content=wrapped_data,
+                # 使用 ensure_ascii=False 确保中文字符不被转义为 Unicode 序列
+                json_str = json.dumps(wrapped_data, ensure_ascii=False)
+                return Response(
+                    content=json_str.encode('utf-8'),
                     status_code=response.status_code,
+                    media_type="application/json; charset=utf-8",
                     headers={
                         k: v for k, v in response.headers.items()
                         if k.lower() not in ("content-length", "content-type")

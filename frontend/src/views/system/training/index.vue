@@ -14,6 +14,7 @@ import EmptyBackground from '@/views/dashboard/common/EmptyBackground.vue'
 import { useClipboard } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { cloneDeep } from 'lodash-es'
+import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 
 interface Form {
   id?: string | null
@@ -21,6 +22,10 @@ interface Form {
   datasource: string | null
   datasource_name: string | null
   description: string | null
+  sql_template: string | null
+  template_k: string | null
+  tables: string | null
+  template_prompt: string | null
 }
 
 const { t } = useI18n()
@@ -51,12 +56,17 @@ const pageInfo = reactive({
 
 const dialogTitle = ref('')
 const updateLoading = ref(false)
+const showAdvancedOptions = ref(false)
 const defaultForm = {
   id: null,
   question: null,
   description: null,
   datasource: null,
   datasource_name: null,
+  sql_template: null,
+  template_k: null,
+  tables: null,
+  template_prompt: null,
 }
 const pageForm = ref<Form>(cloneDeep(defaultForm))
 const copyCode = () => {
@@ -192,6 +202,31 @@ const handleToggleRowSelection = (check: boolean = true) => {
   isIndeterminate.value = !(i === 0 || i === arr.length)
 }
 
+// 解码 Unicode 转义序列（如 \u9999\u6e2f -> 香港）
+const decodeUnicode = (str: string | null | undefined): string => {
+  if (!str) return ''
+  try {
+    // 如果包含 Unicode 转义序列，尝试解码
+    if (str.includes('\\u')) {
+      // 方法1: 使用 JSON.parse 来解码 Unicode 转义序列
+      // 需要先转义反斜杠，然后包装在引号中
+      const escaped = str.replace(/\\/g, '\\\\')
+      return JSON.parse('"' + escaped + '"')
+    }
+    return str
+  } catch (e) {
+    // 如果 JSON.parse 失败，尝试手动替换 Unicode 转义序列
+    try {
+      return str.replace(/\\u([0-9a-fA-F]{4})/g, (_match, code) => {
+        return String.fromCharCode(parseInt(code, 16))
+      })
+    } catch (e2) {
+      // 如果都失败，返回原字符串
+      return str
+    }
+  }
+}
+
 const search = () => {
   searchLoading.value = true
   oldKeywords.value = keywords.value
@@ -203,7 +238,14 @@ const search = () => {
     )
     .then((res) => {
       toggleRowLoading.value = true
-      fieldList.value = res.data
+      // 解码所有字段中的 Unicode 转义序列
+      fieldList.value = res.data.map((item: any) => ({
+        ...item,
+        sql_template: decodeUnicode(item.sql_template),
+        template_k: decodeUnicode(item.template_k),
+        tables: decodeUnicode(item.tables),
+        template_prompt: decodeUnicode(item.template_prompt),
+      }))
       pageInfo.total = res.total_count
       searchLoading.value = false
       nextTick(() => {
@@ -272,7 +314,23 @@ const saveHandler = () => {
 const editHandler = (row: any) => {
   pageForm.value.id = null
   if (row) {
-    pageForm.value = cloneDeep(row)
+    // 解码 Unicode 转义序列
+    const decodedRow = {
+      ...row,
+      sql_template: decodeUnicode(row.sql_template),
+      template_k: decodeUnicode(row.template_k),
+      tables: decodeUnicode(row.tables),
+      template_prompt: decodeUnicode(row.template_prompt),
+    }
+    pageForm.value = cloneDeep(decodedRow)
+    // 如果编辑时新字段有值，自动展开高级选项
+    if (decodedRow.sql_template || decodedRow.template_k || decodedRow.tables || decodedRow.template_prompt) {
+      showAdvancedOptions.value = true
+    } else {
+      showAdvancedOptions.value = false
+    }
+  } else {
+    showAdvancedOptions.value = false
   }
   list()
 
@@ -283,6 +341,7 @@ const editHandler = (row: any) => {
 const onFormClose = () => {
   pageForm.value = cloneDeep(defaultForm)
   dialogFormVisible.value = false
+  showAdvancedOptions.value = false
 }
 
 const handleSizeChange = (val: number) => {
@@ -298,7 +357,15 @@ const handleCurrentChange = (val: number) => {
 const rowInfoDialog = ref(false)
 
 const handleRowClick = (row: any) => {
-  pageForm.value = cloneDeep(row)
+  // 解码 Unicode 转义序列
+  const decodedRow = {
+    ...row,
+    sql_template: decodeUnicode(row.sql_template),
+    template_k: decodeUnicode(row.template_k),
+    tables: decodeUnicode(row.tables),
+    template_prompt: decodeUnicode(row.template_prompt),
+  }
+  pageForm.value = cloneDeep(decodedRow)
   rowInfoDialog.value = true
 }
 
@@ -373,13 +440,45 @@ const onRowFormClose = () => {
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="datasource_name" :label="$t('ds.title')" min-width="240">
+          <el-table-column prop="datasource_name" :label="$t('ds.title')" min-width="180">
+          </el-table-column>
+          <el-table-column prop="sql_template" :label="$t('training.sql_template')" min-width="200" show-overflow-tooltip>
+            <template #default="scope">
+              <div class="field-comment_d">
+                <span :title="scope.row.sql_template" class="notes-in_table">{{
+                  scope.row.sql_template || '-'
+                }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="template_k" :label="$t('training.template_k')" min-width="200" show-overflow-tooltip>
+            <template #default="scope">
+              <div class="field-comment_d">
+                <span :title="scope.row.template_k" class="notes-in_table">{{
+                  scope.row.template_k || '-'
+                }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="tables" :label="$t('training.tables')" min-width="150" show-overflow-tooltip>
+            <template #default="scope">
+              <span>{{ scope.row.tables || '-' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="template_prompt" :label="$t('training.template_prompt')" min-width="200" show-overflow-tooltip>
+            <template #default="scope">
+              <div class="field-comment_d">
+                <span :title="scope.row.template_prompt" class="notes-in_table">{{
+                  scope.row.template_prompt || '-'
+                }}</span>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column
             prop="create_time"
             sortable
             :label="$t('dashboard.create_time')"
-            width="240"
+            width="180"
           >
             <template #default="scope">
               <span>{{ formatTimestamp(scope.row.create_time, 'YYYY-MM-DD HH:mm:ss') }}</span>
@@ -511,6 +610,62 @@ const onRowFormClose = () => {
           <el-option v-for="item in options" :key="item.id" :label="item.name" :value="item.id" />
         </el-select>
       </el-form-item>
+
+      <div style="margin-bottom: 16px">
+        <el-button
+          text
+          type="primary"
+          @click="showAdvancedOptions = !showAdvancedOptions"
+        >
+          <el-icon style="margin-right: 4px">
+            <ArrowUp v-if="showAdvancedOptions" />
+            <ArrowDown v-else />
+          </el-icon>
+          {{ t('training.advanced_options') }}
+        </el-button>
+      </div>
+
+      <el-collapse-transition>
+        <div v-show="showAdvancedOptions">
+          <el-form-item prop="sql_template" :label="t('training.sql_template')">
+            <el-input
+              v-model="pageForm.sql_template"
+              :placeholder="$t('datasource.please_enter') + $t('common.empty') + $t('training.sql_template')"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+              type="textarea"
+              clearable
+            />
+          </el-form-item>
+
+          <el-form-item prop="template_k" :label="t('training.template_k')">
+            <el-input
+              v-model="pageForm.template_k"
+              :placeholder="$t('datasource.please_enter') + $t('common.empty') + $t('training.template_k')"
+              :autosize="{ minRows: 2, maxRows: 6 }"
+              type="textarea"
+              clearable
+            />
+          </el-form-item>
+
+          <el-form-item prop="tables" :label="t('training.tables')">
+            <el-input
+              v-model="pageForm.tables"
+              :placeholder="$t('datasource.please_enter') + $t('common.empty') + $t('training.tables')"
+              clearable
+            />
+          </el-form-item>
+
+          <el-form-item prop="template_prompt" :label="t('training.template_prompt')">
+            <el-input
+              v-model="pageForm.template_prompt"
+              :placeholder="$t('datasource.please_enter') + $t('common.empty') + $t('training.template_prompt')"
+              :autosize="{ minRows: 2, maxRows: 6 }"
+              type="textarea"
+              clearable
+            />
+          </el-form-item>
+        </div>
+      </el-collapse-transition>
     </el-form>
     <template #footer>
       <div v-loading="updateLoading" class="dialog-footer">
@@ -550,6 +705,26 @@ const onRowFormClose = () => {
       <el-form-item :label="t('ds.title')">
         <div class="content">
           {{ pageForm.datasource_name }}
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('training.sql_template')">
+        <div style="white-space: pre-wrap" class="content">
+          {{ pageForm.sql_template || '-' }}
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('training.template_k')">
+        <div style="white-space: pre-wrap" class="content">
+          {{ pageForm.template_k || '-' }}
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('training.tables')">
+        <div class="content">
+          {{ pageForm.tables || '-' }}
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('training.template_prompt')">
+        <div style="white-space: pre-wrap" class="content">
+          {{ pageForm.template_prompt || '-' }}
         </div>
       </el-form-item>
     </el-form>

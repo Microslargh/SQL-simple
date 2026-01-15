@@ -698,7 +698,8 @@ class LLMService:
         for k, v in default_kv.items():
             if k in update_kv:
                 v = update_kv[k]
-            constructed_sql = constructed_sql.replace("[[%s]]" % k, v)
+            constructed_sql = constructed_sql.replace("[[%s]]" % k.lower(), v)
+            constructed_sql = constructed_sql.replace("[[%s]]" % k.upper(), v)
 
         _async_log_util.info(f"constructed_sql: {constructed_sql}")
         sql_result = {
@@ -706,7 +707,7 @@ class LLMService:
             "sql": constructed_sql,
             "tables": tables,
         }
-        sql_result["sql"] = sql_result["sql"].replace("\n", " ")
+        sql_result["sql"] = sql_result["sql"].replace("\\n", "\n")
 
         # _async_log_util.info(f"straight_text: {default_kv}")
         # _async_log_util.info(f"straight_text: {update_kv}")

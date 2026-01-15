@@ -64,6 +64,10 @@ def page_data_training(session: SessionDep, current_page: int = 1, page_size: in
             DataTraining.question,
             DataTraining.create_time,
             DataTraining.description,
+            DataTraining.sql_template,
+            DataTraining.template_k,
+            DataTraining.tables,
+            DataTraining.template_prompt,
         )
         .outerjoin(CoreDatasource, and_(DataTraining.datasource == CoreDatasource.id))
         .where(and_(DataTraining.id.in_(paginated_parent_ids)))
@@ -81,6 +85,10 @@ def page_data_training(session: SessionDep, current_page: int = 1, page_size: in
             question=row.question,
             create_time=row.create_time,
             description=row.description,
+            sql_template=row.sql_template,
+            template_k=row.template_k,
+            tables=row.tables,
+            template_prompt=row.template_prompt,
         ))
 
     return current_page, page_size, total_count, total_pages, _list
@@ -90,8 +98,17 @@ def create_training(session: SessionDep, info: DataTrainingInfo, oid: int, trans
     create_time = datetime.datetime.now()
     if info.datasource is None:
         raise Exception(trans("i18n_data_training.datasource_cannot_be_none"))
-    parent = DataTraining(question=info.question, create_time=create_time, description=info.description, oid=oid,
-                          datasource=info.datasource)
+    parent = DataTraining(
+        question=info.question,
+        create_time=create_time,
+        description=info.description,
+        oid=oid,
+        datasource=info.datasource,
+        sql_template=info.sql_template,
+        template_k=info.template_k,
+        tables=info.tables,
+        template_prompt=info.template_prompt
+    )
 
     exists = session.query(
         session.query(DataTraining).filter(
@@ -137,6 +154,10 @@ def update_training(session: SessionDep, info: DataTrainingInfo, oid: int, trans
         question=info.question,
         description=info.description,
         datasource=info.datasource,
+        sql_template=info.sql_template,
+        template_k=info.template_k,
+        tables=info.tables,
+        template_prompt=info.template_prompt,
     )
     session.execute(stmt)
     session.commit()
@@ -223,6 +244,7 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
             DataTraining.question,
             DataTraining.sql_template,
             DataTraining.template_k,
+            DataTraining.template_prompt,
             DataTraining.tables,
         )
         .where(
@@ -264,7 +286,7 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
         return []
 
     t_list = session.query(DataTraining.id, DataTraining.datasource, DataTraining.question,
-                           DataTraining.description, DataTraining.sql_template, DataTraining.template_k, DataTraining.tables).filter(
+                           DataTraining.description, DataTraining.sql_template, DataTraining.template_k, DataTraining.template_prompt, DataTraining.tables).filter(
         and_(DataTraining.id.in_(_ids))).all()
 
     for row in t_list:
@@ -274,6 +296,7 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
             'suggestion-answer': row.description,
             'sql-template': row.sql_template,
             'sql-info': row.template_k,
+            'template-prompt': row.template_prompt,
             'tables': row.tables,
         }
 
@@ -304,6 +327,7 @@ def to_xml_string(_dict: list[dict] | dict, root: str = 'sql-examples', need_tem
                                       'question',
                                       'sql-template',
                                       'sql-info',
+                                      'template-prompt',
                                       'tables'
                                   ],
                                   custom_root="sql-info-templates",

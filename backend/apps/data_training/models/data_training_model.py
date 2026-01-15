@@ -18,6 +18,7 @@ class DataTraining(SQLModel, table=True):
     sql_template: Optional[str] = Field(sa_column=Column(Text, nullable=True))
     template_k: Optional[str] = Field(sa_column=Column(Text, nullable=True))
     tables: Optional[str] = Field(sa_column=Column(Text, nullable=True))
+    template_prompt: Optional[str] = Field(sa_column=Column(Text, nullable=True))
     embedding: Optional[List[float]] = Field(sa_column=Column(VECTOR(), nullable=True))
 
 
@@ -29,3 +30,7 @@ class DataTrainingInfo(BaseModel):
     create_time: Optional[datetime] = None
     question: Optional[str] = None
     description: Optional[str] = None
+    sql_template: Optional[str] = None
+    template_k: Optional[str] = None
+    tables: Optional[str] = None
+    template_prompt: Optional[str] = None

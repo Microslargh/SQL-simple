@@ -40,7 +40,12 @@
     "training_data_items": "是否删除选中的 {msg} 条示例 SQL？",
     "sql_statement": "SQL 语句",
     "edit_training_data": "编辑示例 SQL",
-    "sales_this_year": "是否删除示例 SQL：{msg}？"
+    "sales_this_year": "是否删除示例 SQL：{msg}？",
+    "sql_template": "SQL 模板",
+    "template_k": "模板关键信息",
+    "tables": "涉及表名",
+    "template_prompt": "模板补充说明",
+    "advanced_options": "高级选项"
   },
   "professional": {
     "cannot_be_repeated": "术语名称，同义词不能重复",

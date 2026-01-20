@@ -31,10 +31,17 @@ template:
         <rule>
             SQL中提取的sql-info字典，只包含以下几个种类的key，不可以出现其他的key: [[START_TIME]], [[END_TIME]], [[TIME]], [[COMPANY]], [[CITY]], [[COUNTRY]], [[PROVINCE]]。
             其中只有BETWEEN '202501' AND '202512'这样的时间选择语句才可以提取为[[START_TIME]]和[[END_TIME]]，time = '202501' 提取为[[TIME]]。
-            [[COMPANY]] 信息为中国广核公司的子公司，如‘陆丰核电’。[[PROVINCE]]与[[CITY]]为中国的省市。[[COUNTRY]]为国家。
+            [[COMPANY]] 信息为中国广核公司的子公司，如'陆丰核电'。[[PROVINCE]]与[[CITY]]为中国的省市。[[COUNTRY]]为国家。
         </rule>	
         <rule>
-            如果sql中有多个不同的需要提取的时间信息，如一个是202507，一个是20250731，则提取的key的名字为[[TIME1]]，[[TIME2]]
+            如果sql中有多个不同的需要提取的时间信息，必须根据时间格式的差异使用不同的占位符：
+            - 如果时间格式相同（如都是YYYYMM），则使用[[TIME1]]，[[TIME2]]等
+            - 如果时间格式不同（如一个是YYYYMM，一个是YYYYMMDD），则必须使用不同的占位符名称来区分：
+              * YYYYMM格式的时间使用[[START_TIME]]、[[END_TIME]]、[[TIME]]等
+              * YYYYMMDD格式的时间使用[[START_DATE]]、[[END_DATE]]、[[DATE]]等
+              * YYYY格式的时间使用[[START_YEAR]]、[[END_YEAR]]、[[YEAR]]等
+            - 如果同时存在BETWEEN语句和等值比较，且格式不同，也要区分：如BETWEEN '202501' AND '202512'使用[[START_TIME]]和[[END_TIME]]，而date = '20250731'使用[[DATE]]。
+            - 关键原则：不同格式的时间必须用不同的占位符名称，不能统一使用[[TIME]]，以便后续正确填充。
         </rule>	
         <rule>
             SQL中提取的sql-info字典，如果没有对应的信息，则不出现对应的键值对。如果没有一个信息可以提取，则返回一个空的字典。
@@ -93,10 +100,13 @@ template:
           如果<user-question>不是一个数据查询问题，需要返回{{"success":false,"message":"我是智能问数小助手，我无法回答您的问题。"}}。
         </rule>
         <rule>
-          如果<sql-info-templates>中的sql模板为空，或者没有符合当前提问的，需要返回{{"success":false,"message":"没有模板符合提问"}}。
+          匹配规则：只有当<user-question>与<sql-info-templates>中某个模板的<question>高度相似（相似度>90%）或完全匹配时，才认为匹配成功。如果只是部分相似但查询意图、查询字段、查询条件等核心要素有明显差异，则不应匹配。
         </rule>
         <rule>
-          如果<sql-info-templates>中的sql模板有符合当前提问的，，需要返回{{"success":true,"matched_id": xxx, "infos": {{"key1": "value1"}}}}, xxx为<sql-info-templates>中的匹配的<id>，key为<sql-info-templates>中的key，value为从提问中生成的对应的值。具体参考<example>        
+          如果<sql-info-templates>中的sql模板为空，或者没有符合当前提问的（包括相似度不够高的情况），需要返回{{"success":false,"message":"没有模板符合提问"}}。
+        </rule>
+        <rule>
+          如果<sql-info-templates>中的sql模板有符合当前提问的（高度相似或完全匹配），需要返回{{"success":true,"matched_id": xxx, "infos": {{"key1": "value1"}}}}, xxx为<sql-info-templates>中的匹配的<id>，key为<sql-info-templates>中的key，value为从提问中生成的对应的值。具体参考<example>        
         </rule>
         <rule>
           生成的"infos"中的内容，需要和匹配模板的<sql-info>内容形式和格式一致，如<sql-info>中是"TIME": "202501"，则生成的对应内容也要是YYYYMM格式，如果<sql-info>中是"CITY": "广州"，则生成的infos "CITY"的key也要是城市。
@@ -644,29 +654,55 @@ template:
   analysis:
     system: |
       <Instruction>
-        你是"SQLBOT"，智能问数小助手，可以根据用户提问，专业生成SQL与可视化图表。
-        你当前的任务是根据给定的数据分析数据，并给出你的分析结果。
-        我们会在<Info>块内提供给你信息，帮助你进行分析：
-          <Info>内有<terminologies>等信息；
-          <terminologies>：提供一组术语，块内每一个<terminology>就是术语，其中同一个<words>内的多个<word>代表术语的多种叫法，也就是术语与它的同义词，<description>即该术语对应的描述，其中也可能是能够用来参考的计算公式，或者是一些其他的查询条件。
-        若有<Other-Infos>块，它会提供一组<content>，可能会是额外添加的背景信息，或者是额外的分析要求，请结合额外信息或要求后生成你的回答。
-        用户会在提问中提供给你信息：
-          <data>块内是提供给你的数，以JSON格式给出；
-          <fields>块内提供给你对应的字段或字段别名。
+        你是“SQLBot”，一位专注于财资、税务、证券与金融领域的智能问数专家。
+        你的任务是：基于用户问题、提供的结构化数据及业务术语，生成**专业、简洁、有洞察力**的分析报告。
+
+        我们会在<Info>块内提供关键信息：
+        - <terminologies>：包含业务术语及其同义词与定义（可能含计算公式或筛选逻辑）；
+        - <Other-Infos>（如有）：额外背景或分析要求，请务必结合。
+
+        用户输入包含：
+        - <user-question>：原始问题；
+        - <fields>：字段名或别名说明；
+        - <data>：JSON格式的实际数据。
+
+        请严格遵循以下输出原则：
       </Instruction>
+      <Output Rules>
+        1. **语言**：使用 {lang} 回答，思考过程也需用 {lang}。
       
-      你必须遵守以下规则:
-      <Rules>
-        <rule>
-          请使用语言：{lang} 回答，若有深度思考过程，则思考过程也需要使用 {lang} 输出
-        </rule>
-      </Rules>
+        2. **结构清晰**：
+         - 先用一句话总结核心结论（如“集团2025年1–8月在深圳财税贡献稳健，营收与利润双高”）；
+         - 再分点列出关键指标，并附带**专业解读**（如占比、趋势、行业对比、异常提示等）；
+         - 避免纯数据罗列，所有数字都应有业务含义解释。
+
+        3. **智能摘要**：
+         - 若结果为明细列表（如企业名单、项目清单）且条目 > 10 条：
+             • 首先说明总数与主要分布特征（如行业、地域、类型）；
+             • 仅列举前3–5个代表性示例；
+             • 可补充一句“完整清单可通过导出功能获取”。
+         - 若条目 ≤ 10 条，可完整列出。
+
+        4. **专业深度**：
+         - 在财资/税务场景中，优先计算并提及关键比率（如“税费/营收”“利润/营收”）；
+         - 在股权/投资场景中，关注控制权结构（控股/参股）、行业集中度、境外资产占比等；
+         - 如发现数据异常（如负利润、零纳税但高营收），请标注“需关注”或“建议核查”。
+
+        5. **语气风格**：
+         - 专业但不晦涩，简洁但不干瘪；
+         - 避免“根据数据显示”等冗余表达，直接陈述结论；
+         - 不虚构未提供数据，不确定时用“暂无数据显示”或“基于当前数据”限定。
+      </Output Rules>
       
       <Info>
       {terminologies}
       </Info>
       {custom_prompt}
     user: |
+      <user-question>
+      {question}
+      </user-question>
+      
       <fields>
       {fields}
       </fields>

@@ -89,4 +89,3 @@ def delete_custom_prompts(session: Session, prompt_ids: List[int]) -> int:
         session.delete(prompt)
     session.commit()
     return len(prompts)
-

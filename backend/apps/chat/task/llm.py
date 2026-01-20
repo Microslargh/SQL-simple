@@ -631,6 +631,8 @@ class LLMService:
 
     @staticmethod
     def generate_straight_sql(training_data, straight_dict_text):
+        import re
+        import json  # 在函数开头导入 json，避免作用域问题
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("="*20 +" generate_straight_sql " + "="*20 + "\n")
             # _async_log_util.info(f"training_data: {training_data}")
@@ -683,25 +685,127 @@ class LLMService:
         default_kv = matched_data.get("sql-info")
         tables_str = matched_data.get("tables")
         
+        # 记录匹配到的模板信息
+        template_id = matched_data.get("id", "unknown")
+        template_question = matched_data.get("question", "")[:100]
+        _async_log_util.info(f"[快速模板] 使用模板ID: {template_id}, 模板问题: {template_question}")
+        
         # 检查必要字段是否存在
         if not constructed_sql:
+            _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少sql-template字段")
             raise SingleMessageError(orjson.dumps({'message': 'sql-template not found in matched data'}).decode())
         if not default_kv:
+            _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少sql-info字段")
             raise SingleMessageError(orjson.dumps({'message': 'sql-info not found in matched data'}).decode())
         if not tables_str:
+            _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少tables字段")
             raise SingleMessageError(orjson.dumps({'message': 'tables not found in matched data'}).decode())
         
         update_kv = straight_dict.get("infos", {})
+        _async_log_util.info(f"[快速模板] 模板ID {template_id} - 默认参数数量: {len(default_kv) if isinstance(default_kv, dict) else 0}, 用户提供参数数量: {len(update_kv) if isinstance(update_kv, dict) else 0}")
         tables = [i.strip().strip("'").strip('"') for i in tables_str.split(",")]
         if isinstance(default_kv, str):
             default_kv = json.loads(default_kv)
+        
+        # 验证 update_kv 中的值是否完整（检查是否有明显的截断）
+        for k, v in update_kv.items():
+            if isinstance(v, str):
+                v_str = str(v).strip()
+                # 检查是否以不完整的引号或括号结尾（可能是截断）
+                if v_str and (v_str.endswith("'") or v_str.endswith('"')) and len(v_str) > 1:
+                    # 检查是否可能是截断的值（比如 '[202508' 而不是完整的值）
+                    if v_str.startswith("'") and not v_str.endswith("';") and not v_str.endswith("'"):
+                        _async_log_util.warning(f"Value for key '{k}' may be incomplete: {v_str}")
+                    elif v_str.startswith('"') and not v_str.endswith('";') and not v_str.endswith('"'):
+                        _async_log_util.warning(f"Value for key '{k}' may be incomplete: {v_str}")
+        
+        # 合并 default_kv 和 update_kv，update_kv 优先级更高
+        merged_kv = {}
         for k, v in default_kv.items():
-            if k in update_kv:
-                v = update_kv[k]
-            constructed_sql = constructed_sql.replace("[[%s]]" % k.lower(), v)
-            constructed_sql = constructed_sql.replace("[[%s]]" % k.upper(), v)
+            merged_kv[k] = v
+        for k, v in update_kv.items():
+            # 如果值看起来不完整，尝试清理（移除可能的截断标记）
+            if isinstance(v, str):
+                v_cleaned = v.strip()
+                # 如果值以不完整的引号结尾，尝试修复
+                if v_cleaned.startswith("'") and v_cleaned.endswith("'") and len(v_cleaned) > 2:
+                    # 可能是完整的值，保留
+                    merged_kv[k] = v
+                elif v_cleaned.startswith('"') and v_cleaned.endswith('"') and len(v_cleaned) > 2:
+                    # 可能是完整的值，保留
+                    merged_kv[k] = v
+                else:
+                    # 使用原始值
+                    merged_kv[k] = v
+            else:
+                merged_kv[k] = v
+        
+        # 替换所有可能的占位符格式
+        for k, v in merged_kv.items():
+            v_str = str(v)
+            
+            # 生成所有可能的键名变体
+            key_variants = [
+                k,  # 原始键名
+                k.upper(),  # 全大写
+                k.lower(),  # 全小写
+                k.capitalize(),  # 首字母大写
+            ]
+            
+            # 如果键名包含下划线，生成不带下划线的变体
+            if '_' in k:
+                key_variants.append(k.lower().replace('_', ''))  # 小写无下划线
+                key_variants.append(k.upper().replace('_', ''))  # 大写无下划线
+            
+            # 如果键名是驼峰式，生成下划线式
+            if re.search(r'[a-z][A-Z]', k):  # 包含小写后跟大写
+                snake_case = re.sub(r'(?<!^)(?=[A-Z])', '_', k).lower()
+                key_variants.append(snake_case)
+            
+            # 对每个键名变体，替换所有可能的占位符格式
+            for key_var in set(key_variants):  # 使用 set 去重
+                # 1. [[KEY]] 格式（双方括号）
+                constructed_sql = constructed_sql.replace(f"[[{key_var}]]", v_str)
+                # 2. [KEY] 格式（单方括号）
+                constructed_sql = constructed_sql.replace(f"[{key_var}]", v_str)
 
-        _async_log_util.info(f"constructed_sql: {constructed_sql}")
+        _async_log_util.info(f"[快速模板] 模板ID {template_id} - 生成的SQL预览: {constructed_sql[:200]}...")
+        
+        # 验证 SQL 是否完整（检查是否有未闭合的引号或括号）
+        if constructed_sql:
+            sql_trimmed = constructed_sql.strip()
+            
+            # 检查 SQL 是否可能被截断
+            # 1. 检查是否以不完整的引号结尾（比如 '[202508' 而不是 '[202508]' 或完整的值）
+            if sql_trimmed:
+                # 检查是否以单引号开头但未正确闭合
+                single_quote_count = sql_trimmed.count("'")
+                double_quote_count = sql_trimmed.count('"')
+                
+                # 如果引号数量是奇数，可能是未闭合的引号
+                if single_quote_count % 2 != 0 or double_quote_count % 2 != 0:
+                    # 检查最后几个字符是否看起来像截断的值
+                    last_chars = sql_trimmed[-20:]
+                    if "'" in last_chars or '"' in last_chars:
+                        # 检查是否以不完整的引号结尾（比如 '... = '[202508'）
+                        if (sql_trimmed.endswith("'") and not sql_trimmed.endswith("';") and 
+                            not sql_trimmed.endswith("'") and sql_trimmed.count("'") > 1):
+                            # 可能是截断，记录警告但继续处理
+                            _async_log_util.warning(f"SQL may have unclosed quotes: {last_chars}")
+                        elif (sql_trimmed.endswith('"') and not sql_trimmed.endswith('";') and 
+                              not sql_trimmed.endswith('"') and sql_trimmed.count('"') > 1):
+                            _async_log_util.warning(f"SQL may have unclosed quotes: {last_chars}")
+                
+                # 2. 检查是否包含基本的 SQL 关键字（验证 SQL 是否完整）
+                sql_upper = sql_trimmed.upper()
+                has_select = 'SELECT' in sql_upper
+                has_from = 'FROM' in sql_upper
+                
+                # 如果包含 SELECT 但没有 FROM，可能是截断的 SQL
+                if has_select and not has_from:
+                    _async_log_util.warning(f"SQL may be incomplete (SELECT without FROM): {sql_trimmed[-100:]}")
+                    # 不抛出异常，让后续的 check_sql 来处理
+        
         sql_result = {
             "success": True,
             "sql": constructed_sql,
@@ -712,8 +816,16 @@ class LLMService:
         # _async_log_util.info(f"straight_text: {default_kv}")
         # _async_log_util.info(f"straight_text: {update_kv}")
 
+        _async_log_util.info(f"[快速模板] 模板ID {template_id} - SQL生成完成，SQL长度: {len(constructed_sql)}, 涉及表: {tables}")
         _async_log_util.info("=" * 20 + " generate_straight_sql " + "=" * 20 + "\n")
-        return json.dumps(sql_result)
+        # 使用 orjson 确保 JSON 序列化正确，特别是处理特殊字符
+        try:
+            return orjson.dumps(sql_result).decode('utf-8')
+        except Exception as e:
+            _async_log_util.error(f"[快速模板] 模板ID {template_id} - JSON序列化失败: {e}")
+            # 如果序列化失败，尝试使用标准 json 库，并确保特殊字符被正确转义
+            # json 已在函数开头导入，无需再次导入
+            return json.dumps(sql_result, ensure_ascii=False)
 
 
     def generate_with_sub_sql(self, sql, sub_mappings: list):
@@ -879,23 +991,44 @@ class LLMService:
     def check_sql(res: str) -> tuple[str, Optional[list]]:
         json_str = extract_nested_json(res)
         if json_str is None:
-            raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
-                                                   'traceback': "Cannot parse sql from answer:\n" + res}).decode())
+            # 尝试直接解析整个响应（可能没有额外的文本包装）
+            try:
+                json_str = res.strip().strip("```").strip("json").strip()
+                # 验证是否是有效的 JSON
+                test_data = orjson.loads(json_str)
+                if 'success' in test_data and 'sql' in test_data:
+                    json_str = res  # 使用原始响应
+            except Exception:
+                raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
+                                                       'traceback': "Cannot parse sql from answer:\n" + res[:500]}).decode())
         sql: str
         data: dict
         try:
             data = orjson.loads(json_str)
 
-            if data['success']:
-                sql = data['sql']
+            if data.get('success', False):
+                sql = data.get('sql', '')
+                # 验证 SQL 是否完整
+                if not sql or sql.strip() == '':
+                    raise SingleMessageError("SQL query is empty in response")
+                # 检查 SQL 是否可能被截断（以不完整的引号或括号结尾）
+                sql_trimmed = sql.strip()
+                if sql_trimmed and (sql_trimmed.endswith("'") or sql_trimmed.endswith('"')) and not sql_trimmed.endswith("';") and not sql_trimmed.endswith('";'):
+                    # 检查是否是完整的 SQL 语句
+                    if not any(keyword in sql_trimmed.upper() for keyword in ['SELECT', 'FROM', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'INSERT', 'UPDATE', 'DELETE']):
+                        if settings.LOG_LEVEL == "DEBUG":
+                            _async_log_util.warning(f"SQL may be incomplete: {sql_trimmed[-100:]}")
             else:
-                message = data['message']
+                message = data.get('message', 'Unknown error')
                 raise SingleMessageError(message)
         except SingleMessageError as e:
             raise e
-        except Exception:
+        except Exception as e:
+            error_msg = f"Cannot parse sql from answer: {str(e)}"
+            if settings.LOG_LEVEL == "DEBUG":
+                _async_log_util.error(f"{error_msg}\nResponse: {res[:500]}")
             raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
-                                                   'traceback': "Cannot parse sql from answer:\n" + res}).decode())
+                                                   'traceback': f"{error_msg}\nResponse preview: {res[:500]}"}).decode())
 
         if sql.strip() == '':
             raise SingleMessageError("SQL query is empty")
@@ -909,23 +1042,46 @@ class LLMService:
         matched_id = None
         json_str = extract_nested_json(res)
         if json_str is None:
-            raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
-                                                   'traceback': "Cannot parse sql from answer:\n" + res}).decode())
+            # 尝试直接解析整个响应（可能没有额外的文本包装）
+            try:
+                json_str = res.strip().strip("```").strip("json").strip()
+                # 验证是否是有效的 JSON
+                orjson.loads(json_str)
+            except Exception:
+                _async_log_util.warning(f"[快速模板匹配] 无法解析LLM响应JSON: {res[:200]}")
+                raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
+                                                       'traceback': "Cannot parse sql from answer:\n" + res[:500]}).decode())
         try:
             data = orjson.loads(json_str)
 
             if "success" not in data or not data['success'] or str(data['success']).lower() == "false":
+                message = data.get('message', 'Unknown error')
+                _async_log_util.info(f"[快速模板匹配] LLM返回匹配失败: {message}")
                 return False, "", ""
             else:
-                matched_id = data["matched_id"]
-                infos = data['infos']
+                matched_id = data.get("matched_id")
+                infos = data.get('infos', {})
+                
+                # 验证 matched_id 和 infos 是否有效
+                if matched_id is None:
+                    _async_log_util.warning(f"[快速模板匹配] matched_id为None，响应: {json_str[:200]}")
+                    return False, "", ""
+                
+                # 验证 infos 是否为空或无效
+                if not infos or (isinstance(infos, dict) and len(infos) == 0):
+                    _async_log_util.warning(f"[快速模板匹配] infos为空，响应: {json_str[:200]}")
+                    return False, "", ""
+                
                 status = True
+                _async_log_util.info(f"[快速模板匹配] 匹配成功 - 模板ID: {matched_id}, 参数数量: {len(infos) if isinstance(infos, dict) else 0}")
 
         except SingleMessageError as e:
             raise e
-        except Exception:
+        except Exception as e:
+            error_msg = f"Cannot parse sql from answer: {str(e)}"
+            _async_log_util.error(f"[快速模板匹配] 解析响应失败: {error_msg}, 响应预览: {res[:500]}")
             raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
-                                                   'traceback': "Cannot parse sql from answer:\n" + res}).decode())
+                                                   'traceback': f"{error_msg}\nResponse preview: {res[:500]}"}).decode())
 
         if str(infos).strip() == '':
             raise SingleMessageError("SQL query is empty")
@@ -1146,6 +1302,12 @@ class LLMService:
                 training_template, sql_info_templates, training_data = get_training_template_with_data(self.session, self.chat_question.question, ds_id, oid)
                 self.chat_question.data_training = training_template
                 
+                # 记录训练数据检索结果
+                _async_log_util.info(f"[快速模板匹配] 检索到 {len(training_data)} 条相似SQL示例 - 用户问题: {self.chat_question.question[:100]}")
+                if training_data:
+                    template_ids = [str(t.get('id', 'unknown')) for t in training_data[:5]]
+                    _async_log_util.info(f"[快速模板匹配] 前5个模板ID: {', '.join(template_ids)}")
+                
                 if in_chat:
                     yield 'data:' + orjson.dumps({
                         'type': 'step-complete',
@@ -1255,11 +1417,19 @@ class LLMService:
             #     _async_log_util.info("DEBUG " * 100)
             #     _async_log_util.info(full_straight_sql_text)
             status, matched_id, infos = self.check_straight_sql(full_straight_sql_text)
+            
+            # 记录快速模板匹配结果
+            if status:
+                _async_log_util.info(f"[快速模板匹配] 匹配成功 - 用户问题: {self.chat_question.question[:100]}, 匹配模板ID: {matched_id}, 匹配参数: {infos}")
+            else:
+                _async_log_util.info(f"[快速模板匹配] 未匹配 - 用户问题: {self.chat_question.question[:100]}, 将使用正常SQL生成流程")
+            
             chart_type = ""
             if status:
                 # 尝试使用快速模板，如果失败则回退到正常SQL生成
                 try:
                     full_sql_text = self.generate_straight_sql(training_data, full_straight_sql_text)
+                    _async_log_util.info(f"[快速模板] 成功使用快速模板生成SQL - 模板ID: {matched_id}, 用户问题: {self.chat_question.question[:100]}")
                     if in_chat:
                         yield 'data:' + orjson.dumps({
                             'type': 'step-start',
@@ -1269,11 +1439,11 @@ class LLMService:
                         }).decode() + '\n\n'
                 except Exception as e:
                     # 快速模板失败，回退到正常SQL生成
-                    if settings.LOG_LEVEL == "DEBUG":
-                        _async_log_util.warning(f"快速模板匹配失败，回退到正常SQL生成: {str(e)}")
+                    _async_log_util.warning(f"[快速模板] 快速模板生成失败，回退到正常SQL生成 - 模板ID: {matched_id}, 错误: {str(e)}, 用户问题: {self.chat_question.question[:100]}")
                     status = False  # 标记为失败，继续执行正常SQL生成流程
             
             if not status:
+                _async_log_util.info(f"[SQL生成] 使用正常SQL生成流程 - 用户问题: {self.chat_question.question[:100]}")
                 # generate sql
                 sql_res = self.generate_sql()
                 full_sql_text = ''

@@ -32,11 +32,50 @@ export class Table extends BaseChart {
     }
   }
 
+  // 判断是否为日期/年份格式（YYYY、YYYYMM、YYYYMMDD等）
+  private isDateOrYearFormat(value: any): boolean {
+    if (value === null || value === undefined || value === '') {
+      return false
+    }
+    const str = String(value).trim()
+    // 检查是否为4位、6位或8位纯数字（可能是年份格式）
+    if (/^\d{4}$/.test(str)) {
+      // 4位数字，可能是年份（如2024）
+      const year = parseInt(str, 10)
+      // 合理的年份范围：1900-2100
+      if (year >= 1900 && year <= 2100) {
+        return true
+      }
+    } else if (/^\d{6}$/.test(str)) {
+      // 6位数字，可能是YYYYMM格式（如202405）
+      const year = parseInt(str.substring(0, 4), 10)
+      const month = parseInt(str.substring(4, 6), 10)
+      if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12) {
+        return true
+      }
+    } else if (/^\d{8}$/.test(str)) {
+      // 8位数字，可能是YYYYMMDD格式（如20240501）
+      const year = parseInt(str.substring(0, 4), 10)
+      const month = parseInt(str.substring(4, 6), 10)
+      const day = parseInt(str.substring(6, 8), 10)
+      if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return true
+      }
+    }
+    return false
+  }
+
   // 格式化数字为千位分隔符
   private formatNumber(value: any): string {
     if (value === null || value === undefined || value === '') {
       return '-'
     }
+    
+    // 如果是日期/年份格式，不进行数字格式化
+    if (this.isDateOrYearFormat(value)) {
+      return String(value)
+    }
+    
     // 尝试转换为数字
     const num = Number(value)
     if (isNaN(num)) {
@@ -55,6 +94,12 @@ export class Table extends BaseChart {
     if (value === null || value === undefined || value === '') {
       return false
     }
+    
+    // 如果是日期/年份格式，不视为数值类型
+    if (this.isDateOrYearFormat(value)) {
+      return false
+    }
+    
     const num = Number(value)
     return !isNaN(num) && isFinite(num)
   }

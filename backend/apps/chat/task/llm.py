@@ -616,6 +616,36 @@ class LLMService:
         self.straight_messages.append(HumanMessage(
             self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
 
+        # 打印发送给模型的完整 prompt（请求体）
+        prompt_content = []
+        for msg in self.straight_messages:
+            if isinstance(msg, SystemMessage):
+                prompt_content.append({
+                    "role": "system",
+                    "content": msg.content
+                })
+            elif isinstance(msg, HumanMessage):
+                prompt_content.append({
+                    "role": "user",
+                    "content": msg.content
+                })
+            elif isinstance(msg, dict):
+                prompt_content.append(msg)
+            else:
+                # 处理其他类型的消息
+                prompt_content.append({
+                    "type": type(msg).__name__,
+                    "content": str(msg.content) if hasattr(msg, 'content') else str(msg)
+                })
+        
+        # 格式化输出 prompt
+        prompt_json = orjson.dumps(prompt_content, option=orjson.OPT_INDENT_2).decode('utf-8')
+        _async_log_util.info("=" * 80)
+        _async_log_util.info("[快速模板匹配] 发送给模型的 Prompt（请求体）:")
+        _async_log_util.info("=" * 80)
+        _async_log_util.info(prompt_json)
+        _async_log_util.info("=" * 80)
+
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
             _async_log_util.info(f"datasource-result: {self.straight_messages}")

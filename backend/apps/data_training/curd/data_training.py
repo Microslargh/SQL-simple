@@ -237,42 +237,99 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
 
     _list: List[DataTraining] = []
 
-    # maybe use label later?
-    stmt = (
+    # 首先尝试精确匹配（完全相同的文本）
+    exact_stmt = (
         select(
             DataTraining.id,
             DataTraining.question,
-            DataTraining.sql_template,
-            DataTraining.template_k,
-            DataTraining.template_prompt,
-            DataTraining.tables,
         )
         .where(
-            and_(or_(text(":sentence ILIKE '%' || question || '%'"), text("question ILIKE '%' || :sentence || '%'")),
-                 DataTraining.oid == oid,
-                 DataTraining.datasource == datasource)
+            and_(
+                DataTraining.question == question,
+                DataTraining.oid == oid,
+                DataTraining.datasource == datasource
+            )
         )
     )
-
-    results = session.execute(stmt, {'sentence': question}).fetchall()
-
-    for row in results:
+    exact_results = session.execute(exact_stmt).fetchall()
+    exact_match_count = len(exact_results)
+    logger.info(f"[数据训练检索] 精确匹配结果数量: {exact_match_count}, 用户问题: {question[:100]}")
+    
+    for row in exact_results:
         _list.append(DataTraining(id=row.id, question=row.question))
 
+    # 然后使用模糊匹配（如果精确匹配没有结果，或者需要更多结果）
+    if exact_match_count == 0 or len(_list) < 5:
+        # 使用参数化查询，避免SQL注入和参数绑定问题
+        fuzzy_stmt = (
+            select(
+                DataTraining.id,
+                DataTraining.question,
+            )
+            .where(
+                and_(
+                    or_(
+                        DataTraining.question.ilike(f'%{question}%'),
+                        text(f"question ILIKE '%' || :sentence || '%'")
+                    ),
+                    DataTraining.oid == oid,
+                    DataTraining.datasource == datasource
+                )
+            )
+        )
+        fuzzy_results = session.execute(fuzzy_stmt, {'sentence': question}).fetchall()
+        fuzzy_match_count = len(fuzzy_results)
+        logger.info(f"[数据训练检索] 模糊匹配结果数量: {fuzzy_match_count}, 用户问题: {question[:100]}")
+        
+        for row in fuzzy_results:
+            # 避免重复添加（精确匹配已经添加的）
+            if not any(item.id == row.id for item in _list):
+                _list.append(DataTraining(id=row.id, question=row.question))
+    
+    text_match_count = len(_list)
+    fuzzy_match_added = fuzzy_match_count - exact_match_count if exact_match_count > 0 else (fuzzy_match_count if exact_match_count == 0 else 0)
+    logger.info(f"[数据训练检索] 文本匹配总结果数量: {text_match_count} (精确匹配: {exact_match_count}, 模糊匹配新增: {fuzzy_match_added})")
+
+    embedding_match_count = 0
     if settings.EMBEDDING_ENABLED:
         try:
+            logger.info(f"[数据训练检索] Embedding检索已启用，开始使用embedding模型检索 - 用户问题: {question[:100]}")
             model = EmbeddingModelCache.get_model()
+            logger.info(f"[数据训练检索] Embedding模型已加载: {type(model).__name__}")
 
             embedding = model.embed_query(question)
+            logger.info(f"[数据训练检索] 问题embedding向量已生成，向量维度: {len(embedding)}")
 
             results = session.execute(text(embedding_sql),
                                       {'embedding_array': str(embedding), 'oid': oid, 'datasource': datasource})
 
+            # 记录embedding检索的详细结果
+            embedding_results_with_similarity = []
             for row in results:
-                _list.append(DataTraining(id=row.id, question=row.question))
+                similarity = getattr(row, 'similarity', None)
+                embedding_results_with_similarity.append({
+                    'id': row.id,
+                    'question': row.question if hasattr(row, 'question') else None,
+                    'similarity': similarity
+                })
+                # 避免重复添加（文本匹配已经添加的）
+                if not any(item.id == row.id for item in _list):
+                    _list.append(DataTraining(id=row.id, question=row.question if hasattr(row, 'question') else ''))
+                    embedding_match_count += 1
+            
+            # 记录相似度详情
+            if embedding_results_with_similarity:
+                top_similarities = [f"ID={r['id']}, 相似度={r['similarity']:.4f}" for r in embedding_results_with_similarity[:5] if r['similarity'] is not None]
+                logger.info(f"[数据训练检索] Embedding检索完成，匹配到 {len(embedding_results_with_similarity)} 条结果（去重后新增: {embedding_match_count}），相似度阈值: {settings.EMBEDDING_DATA_TRAINING_SIMILARITY}, 最大返回数量: {settings.EMBEDDING_DATA_TRAINING_TOP_COUNT}")
+                if top_similarities:
+                    logger.info(f"[数据训练检索] Embedding检索前5个结果相似度: {', '.join(top_similarities)}")
+            else:
+                logger.info(f"[数据训练检索] Embedding检索完成，未匹配到任何结果（相似度阈值: {settings.EMBEDDING_DATA_TRAINING_SIMILARITY}，可能阈值过高）")
 
-        except Exception:
-            logger.error("Failed to query embedding for data training", exc_info=True)
+        except Exception as e:
+            logger.error(f"[数据训练检索] Embedding检索失败: {str(e)}", exc_info=True)
+    else:
+        logger.info(f"[数据训练检索] Embedding检索未启用 (EMBEDDING_ENABLED={settings.EMBEDDING_ENABLED})，仅使用文本匹配")
 
     _map: dict = {}
     _ids: list[int] = []
@@ -303,6 +360,11 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
     _results: list[dict] = []
     for key in _map.keys():
         _results.append(_map.get(key))
+
+    logger.info(f"[数据训练检索] 最终返回 {len(_results)} 条SQL示例 (文本匹配: {text_match_count}, Embedding匹配: {embedding_match_count})")
+    if _results:
+        result_ids = [r.get('id') for r in _results[:5]]
+        logger.info(f"[数据训练检索] 前5个示例ID: {result_ids}")
 
     return _results
 

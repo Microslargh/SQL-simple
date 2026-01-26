@@ -474,8 +474,23 @@ def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDat
         all_tables.append(t_obj)
 
     # do table embedding
+    original_table_count = len(tables) if tables else 0
     if embedding and tables and settings.TABLE_EMBEDDING_ENABLED:
+        import logging
+        table_logger = logging.getLogger(__name__)
+        table_logger.info(f"[表结构检索] 表Embedding检索已启用，开始筛选相关表 - 用户问题: {question[:100]}, 原始表数量: {original_table_count}")
         tables = get_table_embedding(session, current_user, tables, question)
+        filtered_table_count = len(tables) if tables else 0
+        table_logger.info(f"[表结构检索] 表Embedding筛选完成，筛选后表数量: {filtered_table_count}, 最大返回数量: {settings.TABLE_EMBEDDING_COUNT}")
+    else:
+        import logging
+        table_logger = logging.getLogger(__name__)
+        if not embedding:
+            table_logger.info(f"[表结构检索] 表Embedding检索未启用 (embedding参数=False)")
+        elif not settings.TABLE_EMBEDDING_ENABLED:
+            table_logger.info(f"[表结构检索] 表Embedding检索未启用 (TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED})，返回所有表结构，表数量: {original_table_count}")
+        else:
+            table_logger.info(f"[表结构检索] 表列表为空，无法进行Embedding筛选")
     # splice schema
     if tables:
         for s in tables:

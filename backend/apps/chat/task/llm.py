@@ -1332,6 +1332,10 @@ class LLMService:
                 training_template, sql_info_templates, training_data = get_training_template_with_data(self.session, self.chat_question.question, ds_id, oid)
                 self.chat_question.data_training = training_template
                 
+                # 记录embedding配置状态
+                _async_log_util.info(f"[Embedding配置检查] EMBEDDING_ENABLED={settings.EMBEDDING_ENABLED}, EMBEDDING_DATA_TRAINING_SIMILARITY={settings.EMBEDDING_DATA_TRAINING_SIMILARITY}, EMBEDDING_DATA_TRAINING_TOP_COUNT={settings.EMBEDDING_DATA_TRAINING_TOP_COUNT}")
+                _async_log_util.info(f"[Embedding配置检查] TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED}, TABLE_EMBEDDING_COUNT={settings.TABLE_EMBEDDING_COUNT}")
+                
                 # 记录训练数据检索结果
                 _async_log_util.info(f"[快速模板匹配] 检索到 {len(training_data)} 条相似SQL示例 - 用户问题: {self.chat_question.question[:100]}")
                 if training_data:
@@ -1351,8 +1355,13 @@ class LLMService:
                     }).decode() + '\n\n'
                 
                 if SQLBotLicenseUtil.valid() and find_custom_prompts is not None:
-                    self.chat_question.custom_prompt = find_custom_prompts(self.session, CustomPromptTypeEnum.GENERATE_SQL,
+                    custom_prompt_result = find_custom_prompts(self.session, CustomPromptTypeEnum.GENERATE_SQL,
                                                                        oid, ds_id)
+                    self.chat_question.custom_prompt = custom_prompt_result
+                    custom_prompt_length = len(custom_prompt_result) if custom_prompt_result else 0
+                    _async_log_util.info(f"[自定义提示词] 获取自定义提示词完成，类型: GENERATE_SQL, 长度: {custom_prompt_length} 字符")
+                else:
+                    _async_log_util.info(f"[自定义提示词] 未获取自定义提示词 (许可证有效: {SQLBotLicenseUtil.valid()}, find_custom_prompts可用: {find_custom_prompts is not None})")
 
             self.init_messages()
             self.init_straight_messages()
@@ -1412,11 +1421,15 @@ class LLMService:
                                                   'engine_type': self.ds.type_name or self.ds.type,
                                                   'type': 'datasource'}).decode() + '\n\n'
 
+                _async_log_util.info(f"[表结构获取] 开始获取表结构，TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED}")
                 self.chat_question.db_schema = self.out_ds_instance.get_db_schema(
                     self.ds.id) if self.out_ds_instance else get_table_schema(session=self.session,
                                                                               current_user=self.current_user,
                                                                               ds=self.ds,
-                                                                              question=self.chat_question.question)
+                                                                              question=self.chat_question.question,
+                                                                              embedding=True)
+                schema_length = len(self.chat_question.db_schema) if self.chat_question.db_schema else 0
+                _async_log_util.info(f"[表结构获取] 表结构获取完成，schema长度: {schema_length} 字符")
             else:
                 self.validate_history_ds()
 

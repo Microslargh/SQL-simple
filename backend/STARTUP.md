@@ -85,6 +85,12 @@ MCP_IMAGE_HOST=http://localhost:3000
 DEFAULT_EMBEDDING_MODEL=shibing624/text2vec-base-chinese
 EMBEDDING_ENABLED=true
 EMBEDDING_DEFAULT_SIMILARITY=0.4
+# 数据训练（SQL示例库）embedding检索配置
+EMBEDDING_DATA_TRAINING_SIMILARITY=0.6  # 相似度阈值，范围0-1，值越高要求越严格（建议0.5-0.7）
+EMBEDDING_DATA_TRAINING_TOP_COUNT=5     # 最大返回数量，建议5-10
+# 表结构embedding检索配置（用于筛选相关表，减少发送给LLM的表结构数量）
+TABLE_EMBEDDING_ENABLED=true            # 是否启用表结构embedding筛选（默认false，需要手动开启）
+TABLE_EMBEDDING_COUNT=10                # 表embedding筛选返回的最大表数量
 
 # 许可证配置（可选）
 SQLBOT_KEY_EXPIRED=100

@@ -117,8 +117,8 @@ class Settings(BaseSettings):
     # 直接登录配置
     AUTO_LOGIN_ENABLED: bool = False  # 是否启用直接登录模式（默认关闭）
 
-    TABLE_EMBEDDING_ENABLED: bool = False
-    TABLE_EMBEDDING_COUNT: int = 10
+    TABLE_EMBEDDING_ENABLED: bool = Field(default=False, description="是否启用表结构的embedding检索筛选")
+    TABLE_EMBEDDING_COUNT: int = Field(default=10, description="表embedding检索返回的最大表数量")
 
     # OAuth2 SSO 配置
     OAUTH2_ENABLED: bool = True  # 是否启用OAuth2单点登录（默认禁用，需要手动启用）

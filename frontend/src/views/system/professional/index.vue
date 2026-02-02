@@ -331,7 +331,7 @@ const deleteHandlerItem = (idx: number) => {
         <el-input
           v-model="keywords"
           style="width: 240px; margin-right: 12px"
-          :placeholder="$t('professional.search_term')"
+          :placeholder="$t('professional.search_global')"
           clearable
           @blur="search"
         >

@@ -435,6 +435,61 @@ def get_table_obj_by_ds(session: SessionDep, current_user: CurrentUser, ds: Core
     return _list
 
 
+def _build_schema_table_str(obj: TableAndFields, ds: CoreDatasource, db_name: str) -> str:
+    """根据 TableAndFields 构建单表 schema 字符串（含表备注、字段备注）。"""
+    schema_table = ''
+    schema_table += f"# Table: {db_name}.{obj.table.table_name}" if ds.type != "mysql" and ds.type != "es" else f"# Table: {obj.table.table_name}"
+    table_comment = ''
+    if obj.table.custom_comment:
+        table_comment = obj.table.custom_comment.strip()
+    if table_comment == '':
+        schema_table += '\n[\n'
+    else:
+        schema_table += f", {table_comment}\n[\n"
+    if obj.fields:
+        field_list = []
+        for field in obj.fields:
+            field_comment = ''
+            if field.custom_comment:
+                field_comment = field.custom_comment.strip()
+            if field_comment == '':
+                field_list.append(f"({field.field_name}:{field.field_type})")
+            else:
+                field_list.append(f"({field.field_name}:{field.field_type}, {field_comment})")
+        schema_table += ",\n".join(field_list)
+    schema_table += '\n]\n'
+    return schema_table
+
+
+def get_table_schema_for_tables(session: SessionDep, current_user: CurrentUser, ds: CoreDatasource,
+                                 table_names: List[str]) -> str:
+    """
+    仅返回指定表名的表结构（含表备注、字段备注），用于追问时补全历史SQL涉及表的字段定义。
+    table_names: 表名列表，支持带 schema 前缀（如 "default.dws_xxx"），会按最后一段匹配。
+    """
+    if not table_names:
+        return ""
+    table_objs = get_table_obj_by_ds(session=session, current_user=current_user, ds=ds)
+    if not table_objs:
+        return ""
+    db_name = table_objs[0].schema
+    # 标准化：只保留最后一段表名用于匹配
+    normalized_want = set()
+    for t in table_names:
+        t = (t or "").strip().strip('"').strip("'")
+        if not t:
+            continue
+        if "." in t:
+            t = t.split(".")[-1]
+        normalized_want.add(t.lower())
+    schema_str = ""
+    for obj in table_objs:
+        name = (obj.table.table_name or "").lower()
+        if name in normalized_want:
+            schema_str += _build_schema_table_str(obj, ds, db_name)
+    return schema_str
+
+
 def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDatasource, question: str,
                      embedding: bool = True) -> str:
     schema_str = ""

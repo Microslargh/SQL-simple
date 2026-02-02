@@ -31,9 +31,21 @@ def page_data_training(session: SessionDep, current_page: int = 1, page_size: in
 
     if name and name.strip() != "":
         keyword_pattern = f"%{name.strip()}%"
+        # 全局搜索：问题、SQL模板、模板提示、描述、表名
         parent_ids_subquery = (
             select(DataTraining.id)
-            .where(and_(DataTraining.question.ilike(keyword_pattern), DataTraining.oid == oid))  # LIKE查询条件
+            .where(
+                and_(
+                    DataTraining.oid == oid,
+                    or_(
+                        DataTraining.question.ilike(keyword_pattern),
+                        DataTraining.sql_template.ilike(keyword_pattern),
+                        DataTraining.template_prompt.ilike(keyword_pattern),
+                        DataTraining.description.ilike(keyword_pattern),
+                        DataTraining.tables.ilike(keyword_pattern),
+                    )
+                )
+            )
         )
     else:
         parent_ids_subquery = (

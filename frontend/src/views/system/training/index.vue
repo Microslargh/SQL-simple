@@ -383,7 +383,7 @@ const onRowFormClose = () => {
         <el-input
           v-model="keywords"
           style="width: 240px; margin-right: 12px"
-          :placeholder="$t('training.search_problem')"
+          :placeholder="$t('training.search_global')"
           clearable
           @blur="search"
         >

@@ -6,43 +6,6 @@ template:
     
     {data_training}
   sql:
-    double_check: |
-      <Instruction>
-      你是"SQLBOT"，智能问数小助手。
-      你当前的任务是判断用户的问题是否可以使用当前模板。
-      我们会在<user-question>块内提供给你用户的问题。
-      我们会提供<sql-info-template>：提供sql示例，其中<id>是这个模板编号，其中<question>内是提问，<sql-template>内是对于该<question>提问的sql模板，双中括号为可修改信息，
-      <user-sql-info>是这个模板对应<user-question>的填充值。
-      你需要判断这个模板是否能满足用户的问题，同时参考<Rules><Examples>
-      请用两三句话说明匹配与否的原因。请在最后一行只返回True或者False，不要返回别的东西。
-      </Instruction>
-      
-      你必须遵守以下规则:
-      你必须遵守以下规则:
-      <Rules>
-        <rule>
-          在最后一行回答只返回True或者False，不出现别的东西。
-        </rule>
-        <rule>
-          用户问题<user-question>，只允许出现时间，公司，省份城市国家的变动，其他要和<sql-info-template>的<question>的意思严格一致。
-          <rule-example>阳江公司的营收与惠州分公司的收入，是一致的,因为只变动了公司</rule-example>
-          <rule-example>阳江公司的去年的营收与惠州分公司的2023收入，是一致的,因为只变动了公司与时间</rule-example>
-          <rule-example>超过5亿营收的公司与超过10亿营收的公司，是不一致的，因为变动了时间公司地点以外的信息</rule-example>
-          <rule-example>列出2025年收入最高的10个公司与告诉我在2025年1月至12月哪十个公司营收最高，是一致的，因为意思是一样的</rule-example>
-        </rule>
-        <rule>
-          <current-time>是当前时间，是<user-question>的上下文，如<user-question>说去年，<current-time>显示2025，则意思就是2024年。
-        </rule>
-      </Rules>
-      
-      
-      <sql-info-template>
-      <id>{template_id}</id>
-      <question>{template_question}</question>
-      <sql-template>{sql_template}</sql-template>
-      <user-sql-info>{user_sql_info}</user-sql-info>
-      <template-prompt/>
-      </sql-info-template>
     straight_template: |
       <Instruction>
         你是"SQLBOT"，智能问数小助手。
@@ -297,18 +260,10 @@ template:
           <Info>内有<db-engine><m-schema><terminologies>等信息；
           其中，<db-engine>：提供数据库引擎及版本信息；
           <m-schema>：以 M-Schema 格式提供数据库表结构信息；
-          <terminologies>：提供一组术语，块内每一个<terminology>就是术语，其中同一个<words>内的多个<word>代表术语的多种叫法，也就是术语与它的同义词，<description>即该术语对应的描述，其中也可能是能够用来参考的计算公式，或者是一些其他的查询条件。**重要**：当用户问题涉及术语中提到的概念时，必须严格按照术语描述中的规则生成SQL，包括指定的表名、字段名、筛选条件等。例如，如果术语描述中指定了"应从dws_cgn_jq_zbval_month表中取zb_title字段为'四、利润总额（亏损总额以"-"号填列）_本年累计数'去计算"，则必须使用该表和字段，不能使用其他表或字段。术语规则的优先级高于表结构，必须优先遵循术语规则。
+          <terminologies>：提供一组术语，块内每一个<terminology>就是术语，其中同一个<words>内的多个<word>代表术语的多种叫法，也就是术语与它的同义词，<description>即该术语对应的描述，其中也可能是能够用来参考的计算公式，或者是一些其他的查询条件；
           <sql-examples>：提供一组SQL示例，你可以参考这些示例来生成你的回答，其中<question>内是提问，<suggestion-answer>内是对于该<question>提问的解释或者对应应该回答的SQL示例。
         若有<Other-Infos>块，它会提供一组<content>，可能会是额外添加的背景信息，或者是额外的生成SQL的要求，请结合额外信息或要求后生成你的回答。
-        用户的提问在<user-question>内，<error-msg>内则会提供上次执行你提供的SQL时会出现的错误信息，<background-infos>内的<current-time>会告诉你用户当前提问的时间。
-        若存在<context>块，它包含精简的结构化上下文信息：
-          - <entity-ref type="xxx">：实体引用，如上一轮查询返回的公司列表、城市列表等，用于理解"这些"、"它们"等指代词
-          - <sql-pattern>：SQL结构模式（占位符形式），可用于参考SQL结构，但不要直接复制历史SQL的具体值
-          - <intent>：对话意图连续性说明，帮助理解当前问题与历史问题的关系
-          - <data-summary>：相关数据摘要（精简版），仅在必要时提供
-          - <time-range>：时间范围信息，如果当前问题没有明确指定时间，应延续使用上一轮查询的时间范围。例如，如果<time-range start="202501" end="202512">，则生成的SQL应包含相同的时间范围条件。
-          - <history-sql>：完整的历史SQL（仅在追问场景提供），包含上一轮查询使用的表名和字段名。**重要**：当用户进行追问（如"2024年的呢？"、"广东的呢？"等）时，应参考<history-sql>中的表名和字段名，只修改时间、地区等条件，保持表名和字段名不变。例如，如果<history-sql>使用了表"dws_tmis_tax_details_full"和字段"sum_amount"，则当前SQL也应使用相同的表和字段。
-        请结合这些上下文信息生成SQL，但要根据当前问题生成新的SQL，不要直接复制历史SQL的具体值。**特别注意**：如果<time-range>存在且当前问题没有明确指定时间，必须使用<time-range>中的时间范围。**特别重要**：如果<history-sql>存在（追问场景），必须使用<history-sql>中的表名和字段名，只修改查询条件（如时间、地区等）。
+        用户的提问在<user-question>内，<error-msg>内则会提供上次执行你提供的SQL时会出现的错误信息，<background-infos>内的<current-time>会告诉你用户当前提问的时间
       </Instruction>
       
       你必须遵守以下规则:
@@ -321,9 +276,6 @@ template:
         </rule>
         <rule>
           不要编造<m-schema>内没有提供给你的表结构
-        </rule>
-        <rule>
-          **术语规则优先级**：如果<terminologies>中提供了术语规则，必须严格按照术语规则生成SQL。术语规则中指定的表名、字段名、筛选条件等必须严格遵守，即使表结构中存在其他类似的表或字段，也应优先使用术语规则中指定的。
         </rule>
         <rule>
           生成的SQL必须符合<db-engine>内提供数据库引擎的规范
@@ -713,7 +665,6 @@ template:
         - <user-question>：原始问题；
         - <fields>：字段名或别名说明；
         - <data>：JSON格式的实际数据。
-        - <sql>（如有）：生成该数据时使用的SQL查询语句，包含时间范围等筛选条件。**重要**：如果<sql>中存在时间范围条件（如BETWEEN '202501' AND '202512'），必须严格按照SQL中的时间范围进行分析，不要根据数据中的时间字段范围来推断。例如，如果SQL查询的是2025年12月的数据，即使数据中可能包含其他时间的数据，也应明确说明分析的是2025年12月的数据。
 
         请严格遵循以下输出原则：
       </Instruction>
@@ -741,11 +692,6 @@ template:
          - 专业但不晦涩，简洁但不干瘪；
          - 避免“根据数据显示”等冗余表达，直接陈述结论；
          - 不虚构未提供数据，不确定时用“暂无数据显示”或“基于当前数据”限定。
-
-        6. **数据一致性（必须遵守）**：
-         - <data>中的每一行均为当前查询结果，若用户问题或表格标题已明确筛选条件（如「利润超20亿」「营收前10」），则**表格中每一行都满足该条件**。
-         - 分析结论**不得与<data>中的数字矛盾**：例如若某行利润为25亿，不得称该公司「未达20亿」；若表格共5行且标题为「超20亿公司」，则应为「5家公司利润均超20亿」或等价表述，不得称「仅3家超20亿、其余2家未达门槛」。
-         - 在归纳数量、阈值、排名时，必须先核对<data>中对应字段的数值，确保与数据一致。
       </Output Rules>
       
       <Info>
@@ -764,26 +710,6 @@ template:
       <data>
       {data}
       </data>
-      {sql_info}
-  question_enhance:
-    system: |
-      <Instruction>
-        你是"SQLBot"的对话理解助手。用户在进行多轮问数时，会用指代词（如"这些公司"）延续上一轮的问题。
-        你的任务：根据「上一轮用户问题」和「当前用户问题」，生成一句**完整、自然、可直接用于查数**的补充问题。
-        要求：
-        1. 将当前问题中的指代词（这些/它们/上述/刚才的 等）替换为上一轮问题中的关键限定条件，使问题语义完整。
-        2. 保留上一轮中的时间、地区、类型等关键信息（如"2025年底"、"深圳市福田区"、"注册的企业"），并自然融入句子。
-        3. 输出必须是一句通顺的中文问句，不要加引号、不要加解释、不要分点，只输出这一句话。
-        4. 若当前问题已包含时间/地区等限定，不要与上一轮重复或冲突，以当前问题为准并补全指代即可。
-      </Instruction>
-    user: |
-      <上一轮用户问题>
-      {history_question}
-      </上一轮用户问题>
-      <当前用户问题>
-      {current_question}
-      </当前用户问题>
-      请输出补充后的完整问题（仅一句话）：
   predict:
     system: |
       <Instruction>

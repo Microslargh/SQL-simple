@@ -1,0 +1,295 @@
+"""上下文状态管理器 - 系统层精准管理上下文状态"""
+
+import re
+from typing import List, Optional, Dict, Any
+import orjson
+from sqlalchemy.orm import Session
+
+from apps.chat.models.chat_model import ChatLog, ChatRecord
+from apps.chat.context.context_types import ContextNeeds, StructuredContext
+from apps.chat.context.extractors import EntityReferenceExtractor, SQLPatternExtractor, IntentContinuityAnalyzer
+from apps.chat.context.prompt_builder import ContextPromptBuilder
+from apps.chat.context.question_enhancer import QuestionEnhancer, is_any_follow_up
+from common.utils.utils import _async_log_util
+
+
+class ContextStateManager:
+    """上下文状态管理器 - 系统层精准管理上下文状态"""
+    
+    def __init__(self, session: Session, current_user):
+        self.session = session
+        self.current_user = current_user
+        self.entity_extractor = EntityReferenceExtractor(session)
+        self.sql_pattern_extractor = SQLPatternExtractor()
+        self.intent_analyzer = IntentContinuityAnalyzer()
+        self.prompt_builder = ContextPromptBuilder()
+        self.question_enhancer = QuestionEnhancer()
+    
+    def enhance_question_with_history(self, current_question: str, history_logs: List[ChatLog]) -> str:
+        """增强当前问题，自动补充历史问题中的关键信息
+        
+        Args:
+            current_question: 当前用户问题
+            history_logs: 历史SQL日志列表
+            
+        Returns:
+            增强后的问题
+        """
+        if not history_logs or len(history_logs) == 0:
+            return current_question
+        
+        # 获取最近的历史问题
+        latest_log = history_logs[-1]
+        history_question = None
+        
+        if latest_log.messages:
+            for msg in latest_log.messages:
+                if msg.get('type') == 'human':
+                    history_question = msg.get('content', '')
+                    break
+        
+        if not history_question:
+            return current_question
+        
+        # 使用问题增强器增强问题
+        enhanced_question = self.question_enhancer.enhance_question(current_question, history_question)
+        
+        return enhanced_question
+    
+    def analyze_context_needs(self, current_question: str, history_logs: List[ChatLog]) -> ContextNeeds:
+        """分析当前问题需要哪些上下文信息
+        
+        Args:
+            current_question: 当前用户问题
+            history_logs: 历史SQL日志列表
+            
+        Returns:
+            上下文需求分析结果
+        """
+        needs = ContextNeeds()
+        
+        if not history_logs or len(history_logs) == 0:
+            return needs
+        
+        # 1. 识别指代词 或 追问（时间/地区/指标/公司主体）
+        reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
+        has_reference = any(word in current_question for word in reference_words)
+        is_followup = is_any_follow_up(current_question)
+        
+        if has_reference or is_followup:
+            needs.needs_entity_ref = True
+            needs.needs_intent_context = True
+            needs.needs_terminology_enhancement = True  # 需要增强术语检索
+            
+            # 获取历史问题，用于增强术语检索
+            latest_log = history_logs[-1]
+            if latest_log.messages:
+                for msg in latest_log.messages:
+                    if msg.get('type') == 'human':
+                        needs.history_question = msg.get('content', '')
+                        break
+            
+            # 识别需要的实体类型
+            entity_keywords = {
+                'company': ['公司', '企业'],
+                'city': ['城市', '市'],
+                'province': ['省', '省份'],
+                'time': ['时间', '日期', '月份', '年份'],
+            }
+            
+            for entity_type, keywords in entity_keywords.items():
+                if any(keyword in current_question for keyword in keywords):
+                    needs.entity_types.append(entity_type)
+            
+            # 如果没有明确指定实体类型，默认检查公司
+            if not needs.entity_types:
+                needs.entity_types.append('company')
+        
+        # 2. 识别SQL模式需求
+        # 如果问题中包含"类似"、"参考"、"按照"等词，可能需要SQL模式
+        pattern_keywords = ['类似', '参考', '按照', '同样的', '相同的结构']
+        if any(keyword in current_question for keyword in pattern_keywords):
+            needs.needs_sql_pattern = True
+        
+        # 3. 识别意图连续性
+        # 如果问题中包含"继续"、"接着"、"然后"等词，需要意图上下文
+        intent_keywords = ['继续', '接着', '然后', '再', '还']
+        if any(keyword in current_question for keyword in intent_keywords):
+            needs.needs_intent_context = True
+        
+        # 4. 如果历史日志存在，默认需要意图上下文（用于理解对话连续性）
+        if len(history_logs) > 0:
+            needs.needs_intent_context = True
+            # 检查是否需要时间上下文（如果当前问题没有明确指定时间，但历史查询有时间范围）
+            time_keywords = ['时间', '日期', '月份', '年份', '年', '月', '日']
+            has_time_in_current = any(keyword in current_question for keyword in time_keywords)
+            if not has_time_in_current:
+                # 当前问题没有明确时间，需要检查历史是否有时间范围
+                needs.needs_terminology_enhancement = True  # 复用这个标志，表示需要提取时间上下文
+        
+        _async_log_util.info(f"[上下文管理] 上下文需求分析: entity_ref={needs.needs_entity_ref}, "
+                           f"entity_types={needs.entity_types}, sql_pattern={needs.needs_sql_pattern}, "
+                           f"intent={needs.needs_intent_context}")
+        
+        return needs
+    
+    def extract_context(self, needs: ContextNeeds, history_logs: List[ChatLog], current_question: Optional[str] = None) -> StructuredContext:
+        """从历史记录中提取结构化上下文
+        
+        Args:
+            needs: 上下文需求分析结果
+            history_logs: 历史SQL日志列表
+            current_question: 当前用户问题（用于意图分析）
+            
+        Returns:
+            结构化上下文信息
+        """
+        context = StructuredContext()
+        
+        if not history_logs or len(history_logs) == 0:
+            return context
+        
+        # 获取最近的一条历史日志
+        latest_log = history_logs[-1]
+        
+        # 1. 提取实体引用上下文
+        if needs.needs_entity_ref and latest_log.pid:
+            try:
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and record.data and record.data.strip():
+                    try:
+                        exec_data = orjson.loads(record.data)
+                        if exec_data and isinstance(exec_data, dict):
+                            # 提取各种类型的实体
+                            for entity_type in needs.entity_types:
+                                entities = self.entity_extractor.extract_entities_from_data(
+                                    exec_data, entity_type, max_count=50
+                                )
+                                if entities:
+                                    context.entity_references[entity_type] = entities
+                            
+                            # 如果没有指定类型，尝试提取公司
+                            if not context.entity_references and 'company' in needs.entity_types:
+                                companies = self.entity_extractor.extract_companies(exec_data, max_count=50)
+                                if companies:
+                                    context.entity_references['company'] = companies
+                    except Exception as e:
+                        _async_log_util.debug(f"[上下文管理] 解析历史数据失败: {e}")
+            except Exception as e:
+                _async_log_util.debug(f"[上下文管理] 加载历史记录失败: {e}")
+        
+        # 2. 提取SQL模式上下文
+        if needs.needs_sql_pattern and latest_log.pid:
+            try:
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and record.sql and record.sql.strip():
+                    sql_pattern = self.sql_pattern_extractor.extract_pattern(record.sql)
+                    if sql_pattern:
+                        context.sql_pattern = sql_pattern
+            except Exception as e:
+                _async_log_util.debug(f"[上下文管理] 提取SQL模式失败: {e}")
+        
+        # 2.5. 提取时间范围上下文（如果当前问题没有明确指定时间）
+        if latest_log.pid:
+            try:
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and record.sql and record.sql.strip():
+                    time_range = self.entity_extractor.extract_time_range(record.sql)
+                    if time_range:
+                        context.time_range = time_range
+                        _async_log_util.info(f"[上下文管理] 提取到时间范围: {time_range}")
+            except Exception as e:
+                _async_log_util.debug(f"[上下文管理] 提取时间范围失败: {e}")
+        
+        # 2.6. 提取完整历史SQL（用于追问场景，提供表名和字段名参考）
+        # 当检测到追问（时间/地区/指标/公司主体）时，提供完整的历史SQL作为参考
+        if (needs.needs_terminology_enhancement or needs.needs_intent_context) and latest_log.pid:
+            try:
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and record.sql and record.sql.strip():
+                    # 提取完整的历史SQL（限制长度，避免过长）
+                    history_sql = record.sql.strip()
+                    # 限制SQL长度，避免上下文过长（保留前500字符，通常包含表名和关键字段）
+                    if len(history_sql) > 500:
+                        # 尝试保留SELECT和FROM部分（最重要的表名和字段信息）
+                        import re
+                        select_match = re.search(r'(SELECT.*?FROM.*?)(?:WHERE|GROUP|ORDER|LIMIT|$)', history_sql, re.IGNORECASE | re.DOTALL)
+                        if select_match:
+                            history_sql = select_match.group(1) + "..."
+                        else:
+                            history_sql = history_sql[:500] + "..."
+                    context.history_sql = history_sql
+                    _async_log_util.info(f"[上下文管理] 提取到历史SQL（用于追问参考），长度: {len(history_sql)} 字符")
+            except Exception as e:
+                _async_log_util.debug(f"[上下文管理] 提取历史SQL失败: {e}")
+        
+        # 3. 提取意图上下文
+        if needs.needs_intent_context and latest_log.messages:
+            try:
+                # 从历史日志中提取历史问题
+                history_question = None
+                history_sql = None
+                
+                for msg in latest_log.messages:
+                    if msg.get('type') == 'human':
+                        history_question = msg.get('content', '')
+                        break
+                
+                # 获取历史SQL
+                if latest_log.pid:
+                    record = self.session.get(ChatRecord, latest_log.pid)
+                    if record and record.sql:
+                        history_sql = record.sql
+                
+                # 分析意图连续性（需要当前问题，这里暂时使用历史问题作为占位）
+                # 实际使用时，当前问题会在调用时传入
+                if history_question:
+                    # 这里暂时不分析，因为需要当前问题
+                    # 实际分析会在 build_context_prompt 时进行
+                    pass
+            except Exception as e:
+                _async_log_util.debug(f"[上下文管理] 提取意图上下文失败: {e}")
+        
+        return context
+    
+    def build_context_prompt(self, context: StructuredContext, current_question: Optional[str] = None, 
+                           history_logs: Optional[List[ChatLog]] = None) -> Optional[str]:
+        """构建精简、结构化的上下文提示
+        
+        Args:
+            context: 结构化上下文信息
+            current_question: 当前用户问题（用于意图分析）
+            history_logs: 历史日志列表（用于意图分析）
+            
+        Returns:
+            格式化的上下文提示字符串
+        """
+        # 如果提供了当前问题和历史日志，进行意图分析
+        if current_question and history_logs and len(history_logs) > 0:
+            latest_log = history_logs[-1]
+            if latest_log.messages:
+                history_question = None
+                history_sql = None
+                
+                for msg in latest_log.messages:
+                    if msg.get('type') == 'human':
+                        history_question = msg.get('content', '')
+                        break
+                
+                if latest_log.pid:
+                    try:
+                        record = self.session.get(ChatRecord, latest_log.pid)
+                        if record and record.sql:
+                            history_sql = record.sql
+                    except Exception:
+                        pass
+                
+                if history_question:
+                    intent_summary = self.intent_analyzer.analyze_intent(
+                        current_question, history_question, history_sql
+                    )
+                    if intent_summary:
+                        context.intent_summary = intent_summary
+        
+        # 构建提示
+        return self.prompt_builder.build(context)

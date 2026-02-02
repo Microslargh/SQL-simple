@@ -369,7 +369,7 @@ const typeChange = (val: any) => {
         <el-input
           v-model="keywords"
           style="width: 240px; margin-right: 12px"
-          :placeholder="$t('dashboard.search')"
+          :placeholder="$t('prompt.search_global')"
           clearable
           @blur="search"
         >

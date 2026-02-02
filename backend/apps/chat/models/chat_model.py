@@ -191,6 +191,16 @@ class AiModelQuestion(BaseModel):
         return get_sql_template()['straight'].format(engine=self.engine, schema=self.db_schema, question=self.question,
                                                    lang=self.lang, terminologies=self.terminologies,
                                                    data_training=self.data_training, custom_prompt=self.custom_prompt)
+    @staticmethod
+    def double_check_question(template_id, template_question, sql_template, sql_info, user_sql_info):
+        return get_sql_template()['double_check'].format(
+            template_id=template_id,
+            template_question=template_question,
+            sql_template=sql_template,
+            sql_info=sql_info,
+            user_sql_info=user_sql_info,
+        )
+
 
     def sql_straight_template_question(self):
         return get_sql_template()['straight_template'].format(question=self.question)
@@ -211,7 +221,12 @@ class AiModelQuestion(BaseModel):
                                                         custom_prompt=self.custom_prompt)
 
     def analysis_user_question(self):
-        return get_analysis_template()['user'].format(question=self.question, fields=self.fields, data=self.data)
+        # 构建SQL和时间范围信息（如果有）
+        sql_info = ""
+        if self.sql:
+            sql_info = f"\n<sql>\n{self.sql}\n</sql>"
+        
+        return get_analysis_template()['user'].format(question=self.question, fields=self.fields, data=self.data, sql_info=sql_info)
 
     def predict_sys_question(self):
         return get_predict_template()['system'].format(lang=self.lang, custom_prompt=self.custom_prompt)

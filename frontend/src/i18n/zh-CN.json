@@ -22,7 +22,8 @@
     "replaced_with": "请输入提示词，示例：返回姓名时，只显示姓氏，名字用*代替",
     "loss_exercise_caution": "若输入删除数据库、数据表或修改表结构等高风险的操作指令，可能导致数据永久丢失，请务必谨慎！",
     "edit_prompt_word": "编辑提示词",
-    "prompt_word_name_de": "是否删除提示词：{msg}？"
+    "prompt_word_name_de": "是否删除提示词：{msg}？",
+    "search_global": "搜索名称、内容"
   },
   "training": {
     "effective_data_sources": "生效数据源",
@@ -35,6 +36,7 @@
     "problem_description": "问题描述",
     "sample_sql": "示例 SQL",
     "search_problem": "搜索问题",
+    "search_global": "搜索问题、模板、SQL等",
     "add_training_data": "添加示例 SQL",
     "training_data_details": "示例 SQL 详情",
     "training_data_items": "是否删除选中的 {msg} 条示例 SQL？",
@@ -56,6 +58,7 @@
     "term_name": "术语名称",
     "term_description": "术语描述",
     "search_term": "搜索术语",
+    "search_global": "搜索词条、描述",
     "no_term": "暂无术语",
     "create_new_term": "新建术语",
     "export_all": "全部导出",

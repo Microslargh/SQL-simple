@@ -20,7 +20,8 @@
     "replaced_with": "Please enter a prompt word. Example: When returning names, only the last name will be displayed, and the first name will be replaced with *.",
     "loss_exercise_caution": "Entering high-risk operations such as deleting a database or table or modifying the table structure may result in permanent data loss. Exercise caution!",
     "edit_prompt_word": "Edit prompt word",
-    "prompt_word_name_de": "Do you want to delete the prompt word: {msg}?"
+    "prompt_word_name_de": "Do you want to delete the prompt word: {msg}?",
+    "search_global": "Search name, content"
   },
   "training": {
     "effective_data_sources": "Effective data sources",
@@ -33,6 +34,7 @@
     "problem_description": "Problem Description",
     "sample_sql": "Sample SQL",
     "search_problem": "Search Problem",
+    "search_global": "Search question, template, SQL...",
     "add_training_data": "Add SQL Sample",
     "training_data_details": "SQL Sample Details",
     "training_data_items": "Do you want to delete the {msg} selected SQL Sample items?",
@@ -49,6 +51,7 @@
     "term_name": "Term Name",
     "term_description": "Term Description",
     "search_term": "Search Term",
+    "search_global": "Search term, description",
     "no_term": "No Term",
     "create_new_term": "Create New Term",
     "export_all": "Export All",

@@ -32,10 +32,18 @@ def page_terminology(session: SessionDep, current_page: int = 1, page_size: int 
 
     if name and name.strip() != "":
         keyword_pattern = f"%{name.strip()}%"
-        # 步骤1：先找到所有匹配的节点ID（无论是父节点还是子节点）
+        # 步骤1：全局搜索，匹配词条或描述
         matched_ids_subquery = (
             select(Terminology.id)
-            .where(and_(Terminology.word.ilike(keyword_pattern), Terminology.oid == oid))  # LIKE查询条件
+            .where(
+                and_(
+                    Terminology.oid == oid,
+                    or_(
+                        Terminology.word.ilike(keyword_pattern),
+                        Terminology.description.ilike(keyword_pattern),
+                    )
+                )
+            )
             .subquery()
         )
 

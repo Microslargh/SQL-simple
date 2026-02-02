@@ -24,7 +24,13 @@ def list_custom_prompts(
     )
     
     if keyword:
-        stmt = stmt.where(CustomPrompt.name.contains(keyword))
+        kw = f"%{keyword.strip()}%"
+        stmt = stmt.where(
+            or_(
+                CustomPrompt.name.ilike(kw),
+                CustomPrompt.prompt.ilike(kw),
+            )
+        )
     
     # 获取总数
     count_stmt = select(func.count()).select_from(CustomPrompt).where(
@@ -32,7 +38,13 @@ def list_custom_prompts(
         CustomPrompt.type == prompt_type
     )
     if keyword:
-        count_stmt = count_stmt.where(CustomPrompt.name.contains(keyword))
+        kw = f"%{keyword.strip()}%"
+        count_stmt = count_stmt.where(
+            or_(
+                CustomPrompt.name.ilike(kw),
+                CustomPrompt.prompt.ilike(kw),
+            )
+        )
     
     total = session.exec(count_stmt).one()
     

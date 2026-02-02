@@ -1,6 +1,7 @@
 import concurrent
 import json
 import os
+import re
 import traceback
 import urllib.parse
 import warnings
@@ -30,6 +31,8 @@ from apps.chat.curd.chat import save_question, save_sql_answer, save_sql, \
     get_last_execute_sql_error
 from apps.chat.models.chat_model import ChatQuestion, ChatRecord, Chat, RenameChat, ChatLog, OperationEnum, \
     ChatFinishStep
+from apps.chat.context import ContextStateManager
+from apps.chat.context.question_enhancer import is_any_follow_up
 from sqlbot_xpack.license.license_manage import SQLBotLicenseUtil
 # 兼容旧版本 sqlbot-xpack，custom_prompt 模块可能不存在
 try:
@@ -40,7 +43,7 @@ except ImportError:
     find_custom_prompts = None
     CustomPromptTypeEnum = None
 from apps.data_training.curd.data_training import get_training_template, get_training_template_with_data
-from apps.datasource.crud.datasource import get_table_schema
+from apps.datasource.crud.datasource import get_table_schema, get_table_schema_for_tables
 from apps.datasource.crud.permission import get_row_permission_filters, is_normal_user
 from apps.datasource.embedding.ds_embedding import get_ds_embedding
 from apps.datasource.models.datasource import CoreDatasource
@@ -48,6 +51,7 @@ from apps.db.db import exec_sql, get_version, check_connection
 from apps.system.crud.assistant import AssistantOutDs, AssistantOutDsFactory, get_assistant_ds
 from apps.system.schemas.system_schema import AssistantOutDsSchema
 from apps.terminology.curd.terminology import get_terminology_template, get_terminology_template_with_data
+from apps.template.question_enhance.generator import get_question_enhance_template
 from common.core.config import settings
 from common.core.db import engine
 from common.core.deps import CurrentAssistant, CurrentUser
@@ -66,6 +70,30 @@ dynamic_subsql_prefix = 'select * from sqlbot_dynamic_temp_table_'
 session_maker = sessionmaker(bind=engine)
 db_session = session_maker()
 
+
+def _parse_table_names_from_sql(sql: str) -> List[str]:
+    """
+    从 SQL 中解析出表名（FROM / JOIN 后的表），用于追问时补全这些表的字段定义。
+    支持 "schema"."table"、schema.table、table 等写法。
+    """
+    if not sql or not sql.strip():
+        return []
+    names = []
+    # 匹配 FROM / JOIN 后的表：双引号 "schema"."table" 或 单引号 或 无引号标识符
+    # 忽略子查询 (SELECT ... FROM ...) 的简单做法：按 FROM/JOIN 切分后取第一个标识符
+    sql_upper = sql.upper()
+    # 匹配 FROM "xxx"."yyy" 或 FROM xxx.yyy 或 FROM yyy
+    for m in re.finditer(
+        r'\b(?:FROM|JOIN)\s+(["\']?)(\w+)["\']?\s*(?:\.\s*["\']?(\w+)["\']?)?',
+        sql,
+        re.IGNORECASE
+    ):
+        if m.group(3):
+            names.append(f"{m.group(2)}.{m.group(3)}")
+            names.append(m.group(3))  # 也加入纯表名便于匹配
+        else:
+            names.append(m.group(2))
+    return list(dict.fromkeys(names))  # 去重保序
 
 
 class LLMService:
@@ -93,6 +121,7 @@ class LLMService:
     future: Future
 
     last_execute_sql_error: str = None
+    original_question: Optional[str] = None  # 保存原始问题，用于上下文分析
 
     def __init__(self, current_user: CurrentUser, chat_question: ChatQuestion,
                  current_assistant: "CurrentAssistant | None" = None, no_reasoning: bool = False,
@@ -181,49 +210,210 @@ class LLMService:
         except Exception as e:
             return True
 
+    def _enhance_question_by_llm(self, current_question: str, history_question: str) -> Optional[str]:
+        """使用大模型将含指代词或「时间追问」的当前问题补充为完整、自然的一句问句。失败或无效时返回 None。"""
+        reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
+        need_expand = any(word in current_question for word in reference_words) or is_any_follow_up(current_question)
+        if not need_expand:
+            return None
+        if not (current_question and history_question):
+            return None
+        try:
+            tpl = get_question_enhance_template()
+            sys_content = tpl['system']
+            user_content = tpl['user'].format(
+                history_question=history_question,
+                current_question=current_question
+            )
+            messages = [SystemMessage(content=sys_content), HumanMessage(content=user_content)]
+            response = self.llm.invoke(messages)
+            enhanced = (getattr(response, 'content', None) or '').strip()
+            if enhanced and enhanced != current_question:
+                _async_log_util.info(f"[问题增强-LLM] 原始: {current_question}")
+                _async_log_util.info(f"[问题增强-LLM] 补充后: {enhanced}")
+                return enhanced
+        except Exception as e:
+            _async_log_util.debug(f"[问题增强-LLM] 调用失败，将使用规则补充: {e}")
+        return None
+
     def init_messages(self):
-        last_sql_messages: List[dict[str, Any]] = self.generate_sql_logs[-1].messages if len(
-            self.generate_sql_logs) > 0 else []
-
-        # todo maybe can configure
-        count_limit = 0 - base_message_count_limit
-
+        """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
+        
+        # 多轮对话：先尝试用大模型智能补充问题，再回退到规则补充
+        if self.original_question is None:  # 只在第一次调用时保存原始问题
+            self.original_question = self.chat_question.question
+        original_question = self.original_question  # 使用保存的原始问题
+        enhanced_question = self.chat_question.question
+        if len(self.generate_sql_logs) > 0:
+            context_manager = ContextStateManager(self.session, self.current_user)
+            latest_log = self.generate_sql_logs[-1]
+            history_question = None
+            if latest_log.messages:
+                for msg in latest_log.messages:
+                    if msg.get('type') == 'human':
+                        history_question = msg.get('content', '')
+                        break
+            if history_question:
+                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question)
+                if llm_enhanced:
+                    enhanced_question = llm_enhanced
+                else:
+                    enhanced_question = context_manager.enhance_question_with_history(
+                        self.chat_question.question,
+                        self.generate_sql_logs
+                    )
+            else:
+                enhanced_question = context_manager.enhance_question_with_history(
+                    self.chat_question.question,
+                    self.generate_sql_logs
+                )
+            
+            if enhanced_question != self.chat_question.question:
+                _async_log_util.info(f"[问题增强] 原始问题: {self.chat_question.question}")
+                _async_log_util.info(f"[问题增强] 增强后问题: {enhanced_question}")
+                self.chat_question.question = enhanced_question
+        
         # add sys prompt
         self.sql_message.append(SystemMessage(content=self.chat_question.sql_sys_question()))
-        if last_sql_messages is not None and len(last_sql_messages) > 0:
-            # limit count
-            for last_sql_message in last_sql_messages[count_limit:]:
-                _msg: BaseMessage
-                if last_sql_message['type'] == 'human':
-                    _msg = HumanMessage(content=last_sql_message['content'])
-                    self.sql_message.append(_msg)
-                elif last_sql_message['type'] == 'ai':
-                    _msg = AIMessage(content=last_sql_message['content'])
-                    self.sql_message.append(_msg)
+        
+        # 使用上下文管理器进行智能上下文提取
+        # 注意：使用原始问题进行上下文需求分析，以便正确检测时间追问等模式
+        if len(self.generate_sql_logs) > 0:
+            _async_log_util.info(f"[多轮对话] 开始智能上下文分析，历史日志数量: {len(self.generate_sql_logs)}")
+            
+            context_manager = ContextStateManager(self.session, self.current_user)
+            # 使用原始问题检测时间追问等模式，但使用扩展后的问题进行上下文提取
+            context_needs = context_manager.analyze_context_needs(
+                original_question,  # 使用原始问题检测时间追问
+                self.generate_sql_logs
+            )
+            
+            if context_needs.needs_any_context():
+                structured_context = context_manager.extract_context(
+                    context_needs, 
+                    self.generate_sql_logs,
+                    current_question=enhanced_question
+                )
+                context_prompt = context_manager.build_context_prompt(
+                    structured_context,
+                    current_question=enhanced_question,
+                    history_logs=self.generate_sql_logs
+                )
+                
+                if context_prompt:
+                    # 将上下文作为单独的消息添加到提示中
+                    context_message = f"<context>\n{context_prompt}\n</context>"
+                    self.sql_message.append(HumanMessage(content=context_message))
+                    _async_log_util.info(f"[多轮对话] 已添加结构化上下文提示，长度: {len(context_prompt)} 字符")
+                else:
+                    _async_log_util.info(f"[多轮对话] 上下文提取完成，但无有效上下文内容")
+            else:
+                _async_log_util.info(f"[多轮对话] 当前问题无需上下文信息")
+        else:
+            _async_log_util.info(f"[多轮对话] 无历史SQL日志，这是第一轮对话")
 
-        last_chart_messages: List[dict[str, Any]] = self.generate_chart_logs[-1].messages if len(
-            self.generate_chart_logs) > 0 else []
+        # 收集所有历史图表消息（从所有历史日志中）
+        all_chart_messages: List[dict[str, Any]] = []
+        if len(self.generate_chart_logs) > 0:
+            for log in self.generate_chart_logs:
+                if log.messages:
+                    # 从每条日志的messages中提取human和ai消息（跳过system消息）
+                    for msg in log.messages:
+                        if msg.get('type') in ['human', 'ai']:
+                            all_chart_messages.append(msg)
 
         self.chart_message = []
         # add sys prompt
         self.chart_message.append(SystemMessage(content=self.chat_question.chart_sys_question()))
 
-        if last_chart_messages is not None and len(last_chart_messages) > 0:
-            # limit count
-            for last_chart_message in last_chart_messages:
+        if all_chart_messages and len(all_chart_messages) > 0:
+            # 图表消息通常不需要限制数量，因为每次对话通常只有一个图表
+            _async_log_util.info(f"[多轮对话] 加载历史图表消息: 总共 {len(all_chart_messages)} 条")
+            for chart_message in all_chart_messages:
                 _msg: BaseMessage
-                if last_chart_message.get('type') == 'human':
-                    _msg = HumanMessage(content=last_chart_message.get('content'))
+                if chart_message.get('type') == 'human':
+                    _msg = HumanMessage(content=chart_message.get('content'))
                     self.chart_message.append(_msg)
-                elif last_chart_message.get('type') == 'ai':
-                    _msg = AIMessage(content=last_chart_message.get('content'))
+                elif chart_message.get('type') == 'ai':
+                    _msg = AIMessage(content=chart_message.get('content'))
                     self.chart_message.append(_msg)
+        else:
+            _async_log_util.info(f"[多轮对话] 无历史图表消息")
 
     def init_straight_messages(self):
+        """初始化快速模板匹配的消息列表，使用智能上下文管理"""
         self.straight_messages = []
+        
+        # 多轮对话：先尝试用大模型智能补充问题，再回退到规则补充（与 init_messages 一致，问题已在 init_messages 中可能被更新）
+        enhanced_question = self.chat_question.question
+        if len(self.generate_sql_logs) > 0:
+            context_manager = ContextStateManager(self.session, self.current_user)
+            latest_log = self.generate_sql_logs[-1]
+            history_question = None
+            if latest_log.messages:
+                for msg in latest_log.messages:
+                    if msg.get('type') == 'human':
+                        history_question = msg.get('content', '')
+                        break
+            if history_question:
+                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question)
+                if llm_enhanced:
+                    enhanced_question = llm_enhanced
+                else:
+                    enhanced_question = context_manager.enhance_question_with_history(
+                        self.chat_question.question,
+                        self.generate_sql_logs
+                    )
+            else:
+                enhanced_question = context_manager.enhance_question_with_history(
+                    self.chat_question.question,
+                    self.generate_sql_logs
+                )
+            
+            if enhanced_question != self.chat_question.question:
+                _async_log_util.info(f"[问题增强-快速模板] 原始问题: {self.chat_question.question}")
+                _async_log_util.info(f"[问题增强-快速模板] 增强后问题: {enhanced_question}")
+                self.chat_question.question = enhanced_question
+        
         # add straight prompt
         self.straight_messages.append(SystemMessage(content=self.chat_question.sql_straight_question()))
+        
+        # 使用上下文管理器进行智能上下文提取（与init_messages()相同的逻辑）
+        if len(self.generate_sql_logs) > 0:
+            _async_log_util.info(f"[多轮对话-快速模板] 开始智能上下文分析，历史日志数量: {len(self.generate_sql_logs)}")
+            
+            context_manager = ContextStateManager(self.session, self.current_user)
+            # 使用原始问题检测时间追问等模式，但使用扩展后的问题进行上下文提取
+            original_question = self.original_question if self.original_question else enhanced_question
+            context_needs = context_manager.analyze_context_needs(
+                original_question,  # 使用原始问题检测时间追问
+                self.generate_sql_logs
+            )
+            
+            if context_needs.needs_any_context():
+                structured_context = context_manager.extract_context(
+                    context_needs, 
+                    self.generate_sql_logs,
+                    current_question=enhanced_question
+                )
+                context_prompt = context_manager.build_context_prompt(
+                    structured_context,
+                    current_question=enhanced_question,
+                    history_logs=self.generate_sql_logs
+                )
+                
+                if context_prompt:
+                    # 将上下文作为单独的消息添加到提示中
+                    context_message = f"<context>\n{context_prompt}\n</context>"
+                    self.straight_messages.append(HumanMessage(content=context_message))
+                    _async_log_util.info(f"[多轮对话-快速模板] 已添加结构化上下文提示，长度: {len(context_prompt)} 字符")
+                else:
+                    _async_log_util.info(f"[多轮对话-快速模板] 上下文提取完成，但无有效上下文内容")
+            else:
+                _async_log_util.info(f"[多轮对话-快速模板] 当前问题无需上下文信息")
+        else:
+            _async_log_util.info(f"[多轮对话-快速模板] 无历史SQL日志，这是第一轮对话")
 
 
     def init_record(self) -> ChatRecord:
@@ -255,14 +445,51 @@ class LLMService:
                     fields.append(column_str)
         return fields
 
-    def get_fields_from_sql_result(self):
-        """从SQL执行结果中获取字段列表（用于在图表生成前进行分析）"""
-        data_obj = get_chat_chart_data(self.session, self.record.id, self.current_user)
-        fields = []
-        if data_obj and data_obj.get('fields'):
-            # 直接使用SQL执行结果中的字段名
-            fields = data_obj.get('fields', [])
-        return fields
+    @staticmethod
+    def generate_sql_template_from_data_training(self):
+
+        analysis_msg: List[Union[BaseMessage, dict[str, Any]]] = []
+
+        analysis_msg.append(SystemMessage(content=self.chat_question.generate_sql_template_question()))
+        analysis_msg.append(HumanMessage(content=self.chat_question.analysis_user_question()))
+
+        self.current_logs[OperationEnum.ANALYSIS] = start_log(session=self.session,
+                                                              ai_modal_id=self.chat_question.ai_modal_id,
+                                                              ai_modal_name=self.chat_question.ai_modal_name,
+                                                              operate=OperationEnum.ANALYSIS,
+                                                              record_id=self.record.id,
+                                                              full_message=[
+                                                                  {'type': msg.type,
+                                                                   'content': msg.content} for
+                                                                  msg
+                                                                  in analysis_msg])
+        full_thinking_text = ''
+        full_analysis_text = ''
+        token_usage = {}
+        res = process_stream(self.llm.stream(analysis_msg), token_usage)
+        for chunk in res:
+            if chunk.get('content'):
+                full_analysis_text += chunk.get('content')
+            if chunk.get('reasoning_content'):
+                full_thinking_text += chunk.get('reasoning_content')
+            yield chunk
+
+        analysis_msg.append(AIMessage(full_analysis_text))
+
+        self.current_logs[OperationEnum.ANALYSIS] = end_log(session=self.session,
+                                                            log=self.current_logs[
+                                                                OperationEnum.ANALYSIS],
+                                                            full_message=[
+                                                                {'type': msg.type,
+                                                                 'content': msg.content}
+                                                                for msg in analysis_msg],
+                                                            reasoning_content=full_thinking_text,
+                                                            token_usage=token_usage)
+        self.record = save_analysis_answer(session=self.session, record_id=self.record.id,
+                                           current_user=self.current_user,
+                                           answer=orjson.dumps({'content': full_analysis_text}).decode())
+
+
 
     def generate_analysis(self):
         # 优先从图表配置获取字段（图表已在分析之前生成）
@@ -278,6 +505,11 @@ class LLMService:
         self.chat_question.fields = orjson.dumps(fields).decode()
         data = get_chat_chart_data(self.session, self.record.id, self.current_user)
         self.chat_question.data = orjson.dumps(data.get('data')).decode()
+        
+        # 传递SQL信息给数据分析模块，用于正确识别时间范围
+        if self.record and self.record.sql:
+            self.chat_question.sql = self.record.sql
+        
         analysis_msg: List[Union[BaseMessage, dict[str, Any]]] = []
 
         ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
@@ -612,6 +844,71 @@ class LLMService:
                                       answer=orjson.dumps({'content': full_sql_text}).decode(),
                                       current_user=self.current_user)
 
+
+    def double_check_straight_sql_info(self,matched_id, infos, training_data):
+        matched_data = None
+        for i in training_data:
+            if int(matched_id) == int(i["id"]):
+                matched_data = i
+        if not matched_data:
+            return False
+        template_id = matched_data["id"]
+        template_question = matched_data["question"]
+        sql_template = matched_data["sql-template"]
+        sql_info = matched_data["sql-info"]
+        user_sql_info = json.dumps(infos)
+
+        double_check_messages = [
+            SystemMessage(
+                self.chat_question.double_check_question(template_id, template_question, sql_template, sql_info, user_sql_info)),
+            HumanMessage(
+                self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')))]
+
+        # 二次校验时用于排查：若用户问题与模板问题一致仍判 False，可对比此日志
+        _async_log_util.info(
+            f"[快速模板匹配] 二次校验入参 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 当前用户问题: {self.chat_question.question[:80]}"
+        )
+        token_usage = {}
+        res = process_stream(self.llm.stream(double_check_messages), token_usage)
+
+        content_list = []
+        for chunk in res:
+            if chunk.get('content'):
+                content_list += chunk.get('content')
+        content_str = "".join(content_list)
+
+        if settings.LOG_LEVEL == "DEBUG":
+            _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
+            _async_log_util.info("DEBUG" * 20)
+            _async_log_util.info(f"double_check_messages: {double_check_messages}")
+            _async_log_util.info(f"content_str: {content_str}")
+            _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
+        # 解析二次校验结果：要求模型最后一行只返回 True 或 False
+        lines = [line.strip() for line in content_str.split("\n") if line.strip()]
+        # 先看最后一行（模型按要求应在最后一行返回 True/False）
+        last_line = (lines[-1] if lines else "").strip().rstrip(".").rstrip("。").lower()
+        if last_line == "true":
+            _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模型最后一行: {lines[-1] if lines else '(空)'}")
+            return True
+        if last_line == "false":
+            _async_log_util.info(f"[快速模板匹配] 二次校验返回False - 模型完整回复:\n{content_str[:500]}")
+            return False
+        # 最后一行不是 true/false 时，可能是格式问题：在全文找单独一行的 true/false（取最后一次出现）
+        for line in reversed(lines):
+            normalized = line.strip().rstrip(".").rstrip("。").lower()
+            if normalized == "true":
+                _async_log_util.info(f"[快速模板匹配] 二次校验通过（从全文解析） - 找到True的行: {line}")
+                return True
+            if normalized == "false":
+                _async_log_util.info(f"[快速模板匹配] 二次校验解析到False - 模型完整回复:\n{content_str[:500]}")
+                return False
+        # 无法解析出 True/False 时视为未通过，并打出完整回复便于排查
+        _async_log_util.info(
+            f"[快速模板匹配] 二次校验无法解析True/False（可能模型未按「最后一行只返回True或False」输出） - 模型完整回复:\n{content_str[:800]}"
+        )
+        return False
+
+
     def generate_straight_sql_info(self):
         self.straight_messages.append(HumanMessage(
             self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
@@ -655,8 +952,9 @@ class LLMService:
         token_usage = {}
         res = process_stream(self.llm.stream(self.straight_messages), token_usage)
         for chunk in res:
-
             yield chunk
+        # 将token_usage存储到实例变量中，以便外部访问
+        self.straight_sql_token_usage = token_usage
 
 
     @staticmethod
@@ -1113,8 +1411,6 @@ class LLMService:
             raise SingleMessageError(orjson.dumps({'message': 'Cannot parse sql from answer',
                                                    'traceback': f"{error_msg}\nResponse preview: {res[:500]}"}).decode())
 
-        if str(infos).strip() == '':
-            raise SingleMessageError("SQL query is empty")
         return status, matched_id, infos
 
     @staticmethod
@@ -1294,8 +1590,27 @@ class LLMService:
                         'description': '正在检索相关业务术语...'
                     }).decode() + '\n\n'
                 
+                # 多轮对话增强：指代词或任意追问（时间/地区/指标/公司主体）时，结合历史问题检索术语
+                terminology_query = self.chat_question.question
+                if len(self.generate_sql_logs) > 0:
+                    reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
+                    has_reference = any(word in self.chat_question.question for word in reference_words)
+                    is_followup = is_any_follow_up(self.chat_question.question)
+                    
+                    if has_reference or is_followup:
+                        latest_log = self.generate_sql_logs[-1]
+                        if latest_log.messages:
+                            for msg in latest_log.messages:
+                                if msg.get('type') == 'human':
+                                    history_question = msg.get('content', '')
+                                    if history_question:
+                                        terminology_query = f"{history_question} {self.chat_question.question}"
+                                        trigger_type = "追问" if is_followup else "指代词"
+                                        _async_log_util.info(f"[术语检索增强] 检测到{trigger_type}，结合历史问题检索术语: {terminology_query[:200]}")
+                                        break
+                
                 terminology_template, terminology_data = get_terminology_template_with_data(
-                    self.session, self.chat_question.question, oid, ds_id)
+                    self.session, terminology_query, oid, ds_id)
                 self.chat_question.terminologies = terminology_template
                 
                 if in_chat:
@@ -1430,6 +1745,37 @@ class LLMService:
                                                                               embedding=True)
                 schema_length = len(self.chat_question.db_schema) if self.chat_question.db_schema else 0
                 _async_log_util.info(f"[表结构获取] 表结构获取完成，schema长度: {schema_length} 字符")
+                # 追问场景：确保上一轮 SQL 用到的表及其字段定义（含字段备注）被传入，避免漏传导致用错表或字段格式
+                if len(self.generate_sql_logs) > 0 and self.chat_question.db_schema and self.ds:
+                    latest_log = self.generate_sql_logs[-1]
+                    if latest_log.pid:
+                        try:
+                            record = self.session.get(ChatRecord, latest_log.pid)
+                            if record and record.sql and record.sql.strip():
+                                history_table_names = _parse_table_names_from_sql(record.sql)
+                                if history_table_names:
+                                    schema_lower = (self.chat_question.db_schema or "").lower()
+                                    missing = []
+                                    for t in history_table_names:
+                                        name = t.split(".")[-1].strip('"').lower() if t else ""
+                                        if not name:
+                                            continue
+                                        # 表已在 schema 中：存在 "# table: ...name" 或 "# table: xxx.name"
+                                        if re.search(rf"#\s*table:\s*[\w.]*{re.escape(name)}\b", schema_lower):
+                                            continue
+                                        missing.append(t)
+                                    if missing:
+                                        extra_schema = get_table_schema_for_tables(
+                                            session=self.session,
+                                            current_user=self.current_user,
+                                            ds=self.ds,
+                                            table_names=missing
+                                        )
+                                        if extra_schema:
+                                            self.chat_question.db_schema = (self.chat_question.db_schema or "") + "\n" + extra_schema
+                                            _async_log_util.info(f"[表结构获取] 追问补全：已合并上一轮涉及表的字段定义，表: {missing[:10]}")
+                        except Exception as e:
+                            _async_log_util.debug(f"[表结构获取] 追问补全表结构失败: {e}")
             else:
                 self.validate_history_ds()
 
@@ -1447,6 +1793,16 @@ class LLMService:
                     'description': '正在生成SQL语句...'
                 }).decode() + '\n\n'
 
+            # 启动快速模板匹配的日志记录（先启动，如果失败会在后面覆盖）
+            straight_log = start_log(session=self.session,
+                                    ai_modal_id=self.chat_question.ai_modal_id,
+                                    ai_modal_name=self.chat_question.ai_modal_name,
+                                    operate=OperationEnum.GENERATE_SQL,
+                                    record_id=self.record.id,
+                                    full_message=[
+                                        {'type': msg.type, 'content': msg.content} for msg
+                                        in self.straight_messages])
+
             straight_sql_res = self.generate_straight_sql_info()
             # if settings.LOG_LEVEL == "DEBUG":
             #     _async_log_util.info("DEBUG " * 100)
@@ -1454,8 +1810,24 @@ class LLMService:
             #     for i in straight_sql_res:
             #         _async_log_util.info(i)
             full_straight_sql_text = ''
+            full_straight_thinking_text = ''
             for chunk in straight_sql_res:
-                full_straight_sql_text += chunk.get('content')
+                if chunk.get('content'):
+                    full_straight_sql_text += chunk.get('content')
+                if chunk.get('reasoning_content'):
+                    full_straight_thinking_text += chunk.get('reasoning_content')
+                # 将chunk包装成正确的格式
+                if in_chat:
+                    yield 'data:' + orjson.dumps(
+                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
+                         'type': 'sql-result'}).decode() + '\n\n'
+            
+            # 将AI响应添加到straight_messages中，用于日志记录
+            self.straight_messages.append(AIMessage(content=full_straight_sql_text))
+            
+            # 获取token_usage（从generate_straight_sql_info设置的实例变量）
+            token_usage = getattr(self, 'straight_sql_token_usage', {})
+            
             # if settings.LOG_LEVEL == "DEBUG":
             #     _async_log_util.info("DEBUG " * 100)
             #     _async_log_util.info(full_straight_sql_text)
@@ -1467,12 +1839,30 @@ class LLMService:
             else:
                 _async_log_util.info(f"[快速模板匹配] 未匹配 - 用户问题: {self.chat_question.question[:100]}, 将使用正常SQL生成流程")
             
+            double_check_ok = False
+            if status:
+                double_check_ok = self.double_check_straight_sql_info(matched_id, infos, training_data)
+                if double_check_ok:
+                    _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模板ID: {matched_id}")
+                else:
+                    # 二次校验未通过时仍尝试使用快速模板生成SQL，只有实际生成失败才回退到正常流程
+                    _async_log_util.info(f"[快速模板匹配] 二次校验未通过，仍尝试使用快速模板生成SQL - 模板ID: {matched_id}")
+            
             chart_type = ""
             if status:
-                # 尝试使用快速模板，如果失败则回退到正常SQL生成
+                # 尝试使用快速模板（无论二次校验是否通过，只要首次匹配成功就尝试）
                 try:
                     full_sql_text = self.generate_straight_sql(training_data, full_straight_sql_text)
                     _async_log_util.info(f"[快速模板] 成功使用快速模板生成SQL - 模板ID: {matched_id}, 用户问题: {self.chat_question.question[:100]}")
+                    
+                    # 快速模板匹配成功，保存日志
+                    self.current_logs[OperationEnum.GENERATE_SQL] = end_log(session=self.session,
+                                                                           log=straight_log,
+                                                                           full_message=[{'type': msg.type, 'content': msg.content}
+                                                                                        for msg in self.straight_messages],
+                                                                           reasoning_content=full_straight_thinking_text,
+                                                                           token_usage=token_usage)
+                    
                     if in_chat:
                         yield 'data:' + orjson.dumps({
                             'type': 'step-start',
@@ -1484,6 +1874,7 @@ class LLMService:
                     # 快速模板失败，回退到正常SQL生成
                     _async_log_util.warning(f"[快速模板] 快速模板生成失败，回退到正常SQL生成 - 模板ID: {matched_id}, 错误: {str(e)}, 用户问题: {self.chat_question.question[:100]}")
                     status = False  # 标记为失败，继续执行正常SQL生成流程
+                    # 快速模板失败，不保存快速模板的日志，让正常SQL生成流程来保存日志
             
             if not status:
                 _async_log_util.info(f"[SQL生成] 使用正常SQL生成流程 - 用户问题: {self.chat_question.question[:100]}")

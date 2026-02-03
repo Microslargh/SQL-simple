@@ -21,7 +21,7 @@ export abstract class BaseChart {
     this._name = name
   }
 
-  init(axis: Array<ChartAxis>, data: Array<ChartData>): void {
+  init(axis: Array<ChartAxis>, data: Array<ChartData>, _options?: Record<string, unknown>): void {
     this.axis = axis
     this.data = data
   }

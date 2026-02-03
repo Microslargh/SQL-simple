@@ -93,6 +93,7 @@ defineExpose({
       :y="yAxis"
       :series="series"
       :data="data"
+      :question="message?.record?.question"
     />
     <el-empty v-else :description="t('chat.no_data')" />
   </div>

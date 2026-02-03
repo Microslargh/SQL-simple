@@ -126,8 +126,12 @@ export class Table extends BaseChart {
     return summaryRow
   }
 
-  // 处理数据：添加序号列、格式化数值和汇总行
-  private processData(axis: Array<ChartAxis>, data: Array<ChartData>): { processedAxis: Array<ChartAxis>, processedData: Array<ChartData> } {
+  // 处理数据：添加序号列、格式化数值，可选添加汇总行（构成类问题不汇总）
+  private processData(
+    axis: Array<ChartAxis>,
+    data: Array<ChartData>,
+    addSummaryRow: boolean = true
+  ): { processedAxis: Array<ChartAxis>; processedData: Array<ChartData> } {
     if (!data || data.length === 0) {
       return { processedAxis: axis, processedData: [] }
     }
@@ -138,37 +142,36 @@ export class Table extends BaseChart {
       value: '__index__',
     }
     const processedAxis = [indexAxis, ...axis]
-    
+
     // 处理数据：添加序号和格式化数值
     const processedData = data.map((row, index) => {
       const processedRow: ChartData = {
         __index__: index + 1,
       }
-      
-      // 复制原始数据并格式化数值
+
       axis.forEach((col) => {
         const value = row[col.value]
-        // 判断是否为数值类型
         if (this.isNumericField(value)) {
           processedRow[col.value] = this.formatNumber(value)
         } else {
           processedRow[col.value] = value
         }
       })
-      
+
       return processedRow
     })
-    
-    // 添加汇总行
-    const summaryRow = this.calculateSummaryRow(axis, data)
-    processedData.push(summaryRow)
-    
+
+    if (addSummaryRow) {
+      const summaryRow = this.calculateSummaryRow(axis, data)
+      processedData.push(summaryRow)
+    }
+
     return { processedAxis, processedData }
   }
 
-  init(axis: Array<ChartAxis>, data: Array<ChartData>) {
-    // 处理数据：添加序号和格式化
-    const { processedAxis, processedData } = this.processData(axis, data)
+  init(axis: Array<ChartAxis>, data: Array<ChartData>, options?: { showSummaryRow?: boolean }) {
+    const addSummaryRow = options?.showSummaryRow !== false
+    const { processedAxis, processedData } = this.processData(axis, data, addSummaryRow)
     
     super.init(processedAxis, processedData)
 

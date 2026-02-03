@@ -4,6 +4,15 @@ import { getChartInstance } from '@/views/chat/component/index.ts'
 import type { BaseChart, ChartAxis, ChartData } from '@/views/chat/component/BaseChart.ts'
 import { useEmitt } from '@/utils/useEmitt.ts'
 
+/** 是否为「构成类」问题（如两金构成）：此类数据已是总-分结构，表格不展示汇总行避免重复相加 */
+function isCompositionQuestion(question: string | undefined): boolean {
+  if (!question || typeof question !== 'string') return false
+  const q = question.trim()
+  if (q.includes('两金构成')) return true
+  if (q.includes('两金') && q.includes('构成')) return true
+  return false
+}
+
 const params = withDefaults(
   defineProps<{
     id: string | number
@@ -13,6 +22,8 @@ const params = withDefaults(
     x?: Array<ChartAxis>
     y?: Array<ChartAxis>
     series?: Array<ChartAxis>
+    /** 用户问题，用于表格是否展示汇总行（如两金构成时不展示） */
+    question?: string
   }>(),
   {
     data: () => [],
@@ -20,6 +31,7 @@ const params = withDefaults(
     x: () => [],
     y: () => [],
     series: () => [],
+    question: '',
   }
 )
 
@@ -49,7 +61,11 @@ let chartInstance: BaseChart | undefined
 function renderChart() {
   chartInstance = getChartInstance(params.type, chartId.value)
   if (chartInstance) {
-    chartInstance.init(axis.value, params.data)
+    const tableOptions =
+      params.type === 'table'
+        ? { showSummaryRow: !isCompositionQuestion(params.question) }
+        : undefined
+    chartInstance.init(axis.value, params.data, tableOptions)
     chartInstance.render()
   }
   console.debug(chartInstance)

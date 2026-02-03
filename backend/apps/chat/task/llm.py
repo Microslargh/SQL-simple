@@ -236,6 +236,59 @@ class LLMService:
             _async_log_util.debug(f"[问题增强-LLM] 调用失败，将使用规则补充: {e}")
         return None
 
+    def _get_effective_current_time(self) -> str:
+        """获取用于 prompt 的 current_time。
+        若用户提问与法人户数相关且未明确时间，则从 default.dws_cqs_enterprise_query_view_full
+       （is_exit_press_reduce=是）取 create_date 最新值作为 current_time，表示当前表支持查询的最新时间；
+        否则使用系统当前时间。
+        """
+        default_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if not self.ds:
+            return default_time
+        question = (self.chat_question.question or '').strip()
+        # 法人户数相关关键词
+        if '法人户数' not in question and '集团法人户数' not in question:
+            return default_time
+        # 问题中已包含明确时间则用系统时间
+        time_keywords = ['时间', '日期', '月份', '年份', '年', '月', '日', '去年', '今年', '前年']
+        if any(kw in question for kw in time_keywords):
+            return default_time
+        # 法人户数视图：is_exit_press_reduce=是 时取 create_date 最新值（即当前表支持查询的最新时间）
+        try:
+            sql = (
+                "SELECT MAX(create_date) AS latest "
+                "FROM default.dws_cqs_enterprise_query_view_full "
+                "WHERE is_exit_press_reduce = '是'"
+            )
+            result = exec_sql(ds=self.ds, sql=sql)
+            if not result or not result.get('data') or not result['data'][0]:
+                _async_log_util.info(f"[current_time] 法人户数视图无结果，使用系统时间: {default_time}")
+                return default_time
+            row = result['data'][0]
+            # 兼容不同库返回的列名（latest / Latest / max(create_date) 等）
+            raw = row.get('latest') or row.get('Latest')
+            if raw is None and isinstance(row, dict):
+                raw = next((v for k, v in row.items() if v is not None), None)
+            if raw is None:
+                _async_log_util.info(f"[current_time] 法人户数视图结果无有效值，使用系统时间: {default_time}")
+                return default_time
+            # 统一格式为 YYYY-MM-DD HH:MM:SS
+            if isinstance(raw, datetime):
+                effective = raw.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                s = str(raw).strip()
+                if len(s) >= 6 and s.isdigit():
+                    effective = f'{s[:4]}-{s[4:6]}-{s[6:8] if len(s) >= 8 else "01"} 00:00:00'
+                elif len(s) >= 10 and s[4] == '-' and s[7] == '-':
+                    effective = f'{s[:10]} 00:00:00' if len(s) <= 10 else s[:19]
+                else:
+                    effective = default_time
+            _async_log_util.info(f"[current_time] 法人户数未指定时间，使用视图最新 create_date 作为当前时间: {effective}")
+            return effective
+        except Exception as e:
+            _async_log_util.info(f"[current_time] 从法人户数视图取最新 create_date 失败，使用系统时间: {default_time}, 错误: {e}")
+            return default_time
+
     def init_messages(self):
         """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
@@ -818,9 +871,9 @@ class LLMService:
             raise _error
 
     def generate_sql(self):
-        # append current question
+        # append current question（法人户数且未指定时间时 current_time 取自产权表压减=是的最新创建时间）
         self.sql_message.append(HumanMessage(
-            self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
+            self.chat_question.sql_user_question(current_time=self._get_effective_current_time())))
 
         self.current_logs[OperationEnum.GENERATE_SQL] = start_log(session=self.session,
                                                                   ai_modal_id=self.chat_question.ai_modal_id,
@@ -871,7 +924,7 @@ class LLMService:
             SystemMessage(
                 self.chat_question.double_check_question(template_id, template_question, sql_template, sql_info, user_sql_info)),
             HumanMessage(
-                self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')))]
+                self.chat_question.sql_user_question(current_time=self._get_effective_current_time()))]
 
         # 二次校验时用于排查：若用户问题与模板问题一致仍判 False，可对比此日志
         _async_log_util.info(
@@ -920,7 +973,7 @@ class LLMService:
 
     def generate_straight_sql_info(self):
         self.straight_messages.append(HumanMessage(
-            self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
+            self.chat_question.sql_user_question(current_time=self._get_effective_current_time())))
 
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
@@ -1824,8 +1877,9 @@ class LLMService:
                 if double_check_ok:
                     _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模板ID: {matched_id}")
                 else:
-                    # 二次校验未通过时仍尝试使用快速模板生成SQL，只有实际生成失败才回退到正常流程
-                    _async_log_util.info(f"[快速模板匹配] 二次校验未通过，仍尝试使用快速模板生成SQL - 模板ID: {matched_id}")
+                    # 二次校验未通过则中断模板路径，走正常 SQL 生成，避免无依据默认公司/时间
+                    _async_log_util.info(f"[快速模板匹配] 二次校验未通过，中断快速模板，使用正常SQL生成流程 - 模板ID: {matched_id}")
+                    status = False
             
             chart_type = ""
             if status:

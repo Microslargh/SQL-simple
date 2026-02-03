@@ -181,6 +181,7 @@ class AiModelQuestion(BaseModel):
     data_training: str = ""
     custom_prompt: str = ""
     error_msg: str = ""
+    data_total_rows: str = ""  # 数据分析用：SQL 结果总行数，避免上下文截断导致模型误计
 
     def sql_sys_question(self):
         return get_sql_template()['system'].format(engine=self.engine, schema=self.db_schema, question=self.question,
@@ -225,8 +226,11 @@ class AiModelQuestion(BaseModel):
         sql_info = ""
         if self.sql:
             sql_info = f"\n<sql>\n{self.sql}\n</sql>"
-        
-        return get_analysis_template()['user'].format(question=self.question, fields=self.fields, data=self.data, sql_info=sql_info)
+        data_total_rows = self.data_total_rows if self.data_total_rows else ""
+        return get_analysis_template()['user'].format(
+            question=self.question, fields=self.fields, data=self.data, sql_info=sql_info,
+            data_total_rows=data_total_rows
+        )
 
     def predict_sys_question(self):
         return get_predict_template()['system'].format(lang=self.lang, custom_prompt=self.custom_prompt)

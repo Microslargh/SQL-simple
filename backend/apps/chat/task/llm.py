@@ -504,7 +504,16 @@ class LLMService:
         
         self.chat_question.fields = orjson.dumps(fields).decode()
         data = get_chat_chart_data(self.session, self.record.id, self.current_user)
-        self.chat_question.data = orjson.dumps(data.get('data')).decode()
+        raw_data = data.get('data') if isinstance(data, dict) else None
+        total_rows = len(raw_data) if isinstance(raw_data, list) else 0
+        self.chat_question.data_total_rows = str(total_rows)
+        # 数据量过大时只传前 N 条给模型，避免上下文被截断导致模型只看到部分行而误计总数；总数由 data_total_rows 提供（模型支持 256K 上下文，阈值设大一些）
+        ANALYSIS_DATA_ROW_LIMIT = 8000
+        if total_rows > ANALYSIS_DATA_ROW_LIMIT:
+            self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
+            _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析，总数以 data_total_rows 为准")
+        else:
+            self.chat_question.data = orjson.dumps(raw_data).decode() if raw_data is not None else "[]"
         
         # 传递SQL信息给数据分析模块，用于正确识别时间范围
         if self.record and self.record.sql:
@@ -912,36 +921,6 @@ class LLMService:
     def generate_straight_sql_info(self):
         self.straight_messages.append(HumanMessage(
             self.chat_question.sql_user_question(current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
-
-        # 打印发送给模型的完整 prompt（请求体）
-        prompt_content = []
-        for msg in self.straight_messages:
-            if isinstance(msg, SystemMessage):
-                prompt_content.append({
-                    "role": "system",
-                    "content": msg.content
-                })
-            elif isinstance(msg, HumanMessage):
-                prompt_content.append({
-                    "role": "user",
-                    "content": msg.content
-                })
-            elif isinstance(msg, dict):
-                prompt_content.append(msg)
-            else:
-                # 处理其他类型的消息
-                prompt_content.append({
-                    "type": type(msg).__name__,
-                    "content": str(msg.content) if hasattr(msg, 'content') else str(msg)
-                })
-        
-        # 格式化输出 prompt
-        prompt_json = orjson.dumps(prompt_content, option=orjson.OPT_INDENT_2).decode('utf-8')
-        _async_log_util.info("=" * 80)
-        _async_log_util.info("[快速模板匹配] 发送给模型的 Prompt（请求体）:")
-        _async_log_util.info("=" * 80)
-        _async_log_util.info(prompt_json)
-        _async_log_util.info("=" * 80)
 
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")

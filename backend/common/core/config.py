@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     LOCAL_MODEL_PATH: str = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../my_model'))
     # LOCAL_MODEL_PATH: str = '/opt/sqlbot/models'
     DEFAULT_EMBEDDING_MODEL: str = 'shibing624/text2vec-base-chinese'
+    # 当设置 EMBEDDING_API_BASE_URL 时使用 API 嵌入（如 Qwen3-embedding-8B），否则使用本地 HuggingFace 模型
+    EMBEDDING_API_BASE_URL: str = Field(default='', description="Embedding API 基地址，如 http://host:port/v1，留空则使用本地模型")
+    EMBEDDING_API_MODEL: str = Field(default='qwen3-embedding-8b', description="API 嵌入模型名称")
+    EMBEDDING_API_KEY: str = Field(default='', description="Embedding API Key，若服务不需要可留空")
     EMBEDDING_ENABLED: bool = True
     EMBEDDING_DEFAULT_SIMILARITY: float = 0.4
     EMBEDDING_TERMINOLOGY_SIMILARITY: float = EMBEDDING_DEFAULT_SIMILARITY

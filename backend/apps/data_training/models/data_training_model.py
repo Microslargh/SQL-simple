@@ -2,6 +2,9 @@ from datetime import datetime
 from typing import List, Optional
 
 from pgvector.sqlalchemy import VECTOR
+
+# 与 Qwen3-embedding-8B 等 API 模型一致，固定 4096 维
+EMBEDDING_VECTOR_DIM = 4096
 from pydantic import BaseModel
 from sqlalchemy import Column, Text, BigInteger, DateTime, Identity
 from sqlmodel import SQLModel, Field
@@ -19,7 +22,7 @@ class DataTraining(SQLModel, table=True):
     template_k: Optional[str] = Field(sa_column=Column(Text, nullable=True))
     tables: Optional[str] = Field(sa_column=Column(Text, nullable=True))
     template_prompt: Optional[str] = Field(sa_column=Column(Text, nullable=True))
-    embedding: Optional[List[float]] = Field(sa_column=Column(VECTOR(), nullable=True))
+    embedding: Optional[List[float]] = Field(sa_column=Column(VECTOR(EMBEDDING_VECTOR_DIM), nullable=True))
 
 
 class DataTrainingInfo(BaseModel):

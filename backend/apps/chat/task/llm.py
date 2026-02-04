@@ -247,7 +247,7 @@ class LLMService:
             return default_time
         question = (self.chat_question.question or '').strip()
         # 法人户数相关关键词
-        if '法人户数' not in question and '集团法人户数' not in question:
+        if '法人户数' not in question and '集团法人户数' not in question and '户数' not in question and '法人' not in question:
             return default_time
         # 问题中已包含明确时间则用系统时间
         time_keywords = ['时间', '日期', '月份', '年份', '年', '月', '日', '去年', '今年', '前年']

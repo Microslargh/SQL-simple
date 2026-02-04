@@ -82,6 +82,11 @@ MCP_IMAGE_PATH=/opt/sqlbot/images
 MCP_IMAGE_HOST=http://localhost:3000
 
 # Embedding 配置
+# 方式一：使用 API 嵌入（如 Qwen3-embedding-8B，4096 维）。设置 EMBEDDING_API_BASE_URL 后生效，不再使用本地模型
+# EMBEDDING_API_BASE_URL=http://your-host:port/v1
+# EMBEDDING_API_MODEL=qwen3-embedding-8b
+# EMBEDDING_API_KEY=your-api-key   # 若服务不需要鉴权可留空或不配置
+# 方式二：使用本地 HuggingFace 模型（不设置 EMBEDDING_API_BASE_URL 时）
 DEFAULT_EMBEDDING_MODEL=shibing624/text2vec-base-chinese
 EMBEDDING_ENABLED=true
 EMBEDDING_DEFAULT_SIMILARITY=0.4

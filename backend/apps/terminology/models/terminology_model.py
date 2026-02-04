@@ -2,6 +2,9 @@ from datetime import datetime
 from typing import List, Optional
 
 from pgvector.sqlalchemy import VECTOR
+
+# 与 Qwen3-embedding-8B 等 API 模型一致，固定 4096 维
+EMBEDDING_VECTOR_DIM = 4096
 from pydantic import BaseModel
 from sqlalchemy import Column, Text, BigInteger, DateTime, Identity, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
@@ -16,7 +19,7 @@ class Terminology(SQLModel, table=True):
     create_time: Optional[datetime] = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
     word: Optional[str] = Field(max_length=255)
     description: Optional[str] = Field(sa_column=Column(Text, nullable=True))
-    embedding: Optional[List[float]] = Field(sa_column=Column(VECTOR(), nullable=True))
+    embedding: Optional[List[float]] = Field(sa_column=Column(VECTOR(EMBEDDING_VECTOR_DIM), nullable=True))
     specific_ds: Optional[bool] = Field(sa_column=Column(Boolean, default=False))
     datasource_ids: Optional[list[int]] = Field(sa_column=Column(JSONB), default=[])
 

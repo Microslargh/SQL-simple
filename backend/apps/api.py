@@ -5,7 +5,7 @@ from apps.dashboard.api import dashboard_api
 from apps.data_training.api import data_training
 from apps.datasource.api import datasource, table_relation
 from apps.mcp import mcp
-from apps.system.api import login, user, aimodel, workspace, assistant, callback, oauth2, auth, custom_prompt
+from apps.system.api import login, user, aimodel, workspace, assistant, callback, oauth2, auth, custom_prompt, error_query_record
 from apps.terminology.api import terminology
 
 api_router = APIRouter()
@@ -19,6 +19,7 @@ api_router.include_router(assistant.router)
 api_router.include_router(aimodel.router)
 api_router.include_router(terminology.router)
 api_router.include_router(custom_prompt.router)
+api_router.include_router(error_query_record.router)
 api_router.include_router(data_training.router)
 api_router.include_router(datasource.router)
 api_router.include_router(chat.router)

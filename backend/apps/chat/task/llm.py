@@ -33,6 +33,7 @@ from apps.chat.models.chat_model import ChatQuestion, ChatRecord, Chat, RenameCh
     ChatFinishStep
 from apps.chat.context import ContextStateManager
 from apps.chat.context.question_enhancer import is_any_follow_up
+from apps.chat.utils.table_selection_rule import generate_table_selection_rule
 from sqlbot_xpack.license.license_manage import SQLBotLicenseUtil
 # 兼容旧版本 sqlbot-xpack，custom_prompt 模块可能不存在
 try:
@@ -122,6 +123,7 @@ class LLMService:
 
     last_execute_sql_error: str = None
     original_question: Optional[str] = None  # 保存原始问题，用于上下文分析
+    table_selection_info: Optional[Dict[str, any]] = None  # 表选择规则信息（包含状态、规则文本、数据来源提示等）
 
     def __init__(self, current_user: CurrentUser, chat_question: ChatQuestion,
                  current_assistant: "CurrentAssistant | None" = None, no_reasoning: bool = False,
@@ -326,6 +328,23 @@ class LLMService:
                 _async_log_util.info(f"[问题增强] 原始问题: {self.chat_question.question}")
                 _async_log_util.info(f"[问题增强] 增强后问题: {enhanced_question}")
                 self.chat_question.question = enhanced_question
+        
+        # 生成年报表/月报表选择规则（如果适用）
+        table_selection_info = generate_table_selection_rule(
+            question=self.chat_question.question,
+            current_time=self._get_effective_current_time()
+        )
+        if table_selection_info:
+            self.table_selection_info = table_selection_info
+            if table_selection_info["status"] == "no_data":
+                # 当前暂无数据，不生成SQL，直接返回错误消息
+                _async_log_util.info(f"[表选择规则] 检测到当前暂无数据，查询年份: {table_selection_info.get('year', 'unknown')}")
+            elif table_selection_info["status"] == "rule":
+                # 将规则追加到 custom_prompt（如果 custom_prompt 存在则追加，否则直接使用规则）
+                original_custom_prompt = self.chat_question.custom_prompt or ""
+                rule_text = table_selection_info["rule_text"]
+                self.chat_question.custom_prompt = f"{original_custom_prompt}\n\n{rule_text}" if original_custom_prompt else rule_text
+                _async_log_util.info(f"[表选择规则] 已生成并注入规则，表类型: {table_selection_info['table_type']}, 表名: {table_selection_info['table_name']}")
         
         # add sys prompt
         self.sql_message.append(SystemMessage(content=self.chat_question.sql_sys_question()))
@@ -577,9 +596,24 @@ class LLMService:
         ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
         self.chat_question.terminologies = get_terminology_template(self.session, self.chat_question.question,
                                                                     self.current_user.oid, ds_id)
+        
+        # 获取自定义提示词
+        custom_prompt_parts = []
         if SQLBotLicenseUtil.valid() and find_custom_prompts is not None:
-            self.chat_question.custom_prompt = find_custom_prompts(self.session, CustomPromptTypeEnum.ANALYSIS,
-                                                               self.current_user.oid, ds_id)
+            custom_prompt_from_db = find_custom_prompts(self.session, CustomPromptTypeEnum.ANALYSIS,
+                                                       self.current_user.oid, ds_id)
+            if custom_prompt_from_db:
+                custom_prompt_parts.append(custom_prompt_from_db)
+        
+        # 添加数据来源温馨提示（如果适用）- 以 markdown 格式添加到 custom_prompt
+        if self.table_selection_info and self.table_selection_info.get("status") == "rule":
+            data_source_hint = self.table_selection_info.get("data_source_hint")
+            if data_source_hint:
+                custom_prompt_parts.append(data_source_hint)
+                _async_log_util.info(f"[数据分析] 已添加数据来源提示到 custom_prompt: {data_source_hint}")
+        
+        # 合并所有 custom_prompt 部分
+        self.chat_question.custom_prompt = "\n\n".join(custom_prompt_parts) if custom_prompt_parts else ""
 
         analysis_msg.append(SystemMessage(content=self.chat_question.analysis_sys_question()))
         analysis_msg.append(HumanMessage(content=self.chat_question.analysis_user_question()))
@@ -871,6 +905,29 @@ class LLMService:
             raise _error
 
     def generate_sql(self):
+        # 检查表选择规则：如果当前暂无数据，直接返回错误消息
+        if self.table_selection_info and self.table_selection_info.get("status") == "no_data":
+            error_msg = '{"success":false,"message":"当前暂无想要查询的数据"}'
+            yield {'content': error_msg}
+            self.sql_message.append(AIMessage(error_msg))
+            self.current_logs[OperationEnum.GENERATE_SQL] = start_log(session=self.session,
+                                                                      ai_modal_id=self.chat_question.ai_modal_id,
+                                                                      ai_modal_name=self.chat_question.ai_modal_name,
+                                                                      operate=OperationEnum.GENERATE_SQL,
+                                                                      record_id=self.record.id,
+                                                                      full_message=[{'type': 'human', 'content': self.chat_question.question},
+                                                                                   {'type': 'ai', 'content': error_msg}])
+            self.current_logs[OperationEnum.GENERATE_SQL] = end_log(session=self.session,
+                                                                    log=self.current_logs[OperationEnum.GENERATE_SQL],
+                                                                    full_message=[{'type': 'human', 'content': self.chat_question.question},
+                                                                                 {'type': 'ai', 'content': error_msg}],
+                                                                    reasoning_content='',
+                                                                    token_usage={})
+            self.record = save_sql_answer(session=self.session, record_id=self.record.id,
+                                          current_user=self.current_user,
+                                          answer=orjson.dumps({'content': error_msg}).decode())
+            return
+        
         # append current question（法人户数且未指定时间时 current_time 取自产权表压减=是的最新创建时间）
         self.sql_message.append(HumanMessage(
             self.chat_question.sql_user_question(current_time=self._get_effective_current_time())))

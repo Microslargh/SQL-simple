@@ -331,6 +331,9 @@ export const chatApi = {
   recommendQuestions: (record_id: number | undefined, controller?: AbortController) => {
     return request.fetchStream(`/chat/recommend_questions/${record_id}`, {}, controller)
   },
+  /** 对话反馈：点赞/点踩。点踩时 reason 为 no_result | inaccurate_data | wrong_analysis */
+  feedback: (recordId: number, isLike: boolean, reason?: string) =>
+    request.post('/chat/feedback', { record_id: recordId, is_like: isLike, reason }),
   checkLLMModel: () => request.get('/system/aimodel/default', { requestOptions: { silent: true } }),
   export2Excel: (data: any) =>
     request.post('/chat/excel/export', data, {

@@ -95,6 +95,8 @@ class Settings(BaseSettings):
     EMBEDDING_API_BASE_URL: str = Field(default='', description="Embedding API 基地址，如 http://host:port/v1，留空则使用本地模型")
     EMBEDDING_API_MODEL: str = Field(default='qwen3-embedding-8b', description="API 嵌入模型名称")
     EMBEDDING_API_KEY: str = Field(default='', description="Embedding API Key，若服务不需要可留空")
+    # 库表 embedding 列维度，须与 migration 中 VECTOR 维度一致。本地 768 维模型会自动填充到该维度后写入
+    EMBEDDING_VECTOR_DIMENSION: int = Field(default=4096, description="embedding 存储维度：768=本地 text2vec，4096=API 如 Qwen3-embedding-8B")
     EMBEDDING_ENABLED: bool = True
     EMBEDDING_DEFAULT_SIMILARITY: float = 0.4
     EMBEDDING_TERMINOLOGY_SIMILARITY: float = EMBEDDING_DEFAULT_SIMILARITY

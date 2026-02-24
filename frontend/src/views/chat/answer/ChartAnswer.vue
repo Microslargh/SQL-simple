@@ -282,6 +282,8 @@ const sendMessage = async () => {
                 // 分析完成，但继续等待图表
                 break
               case 'finish':
+                currentRecord.finish = true
+                _currentChat.value.records[index.value].finish = true
                 emits('finish', currentRecord.id)
                 break
             }
@@ -299,6 +301,13 @@ const sendMessage = async () => {
     }
     currentRecord.error = currentRecord.error + 'Error:' + error
     console.error('Error:', error)
+    // 即使出错也标记为结束，以便展示点赞/点踩
+    if (currentRecord.id != null) {
+      currentRecord.finish = true
+      if (index.value >= 0 && _currentChat.value.records[index.value]) {
+        _currentChat.value.records[index.value].finish = true
+      }
+    }
     emits('error')
   } finally {
     _loading.value = false

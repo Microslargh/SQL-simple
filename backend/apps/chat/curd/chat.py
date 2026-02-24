@@ -7,7 +7,7 @@ from sqlalchemy import and_, select, update
 from sqlalchemy.orm import aliased
 
 from apps.chat.models.chat_model import Chat, ChatRecord, CreateChat, ChatInfo, RenameChat, ChatQuestion, ChatLog, \
-    TypeEnum, OperationEnum, ChatRecordResult
+    TypeEnum, OperationEnum, ChatRecordResult, ErrorQueryRecord
 from apps.datasource.models.datasource import CoreDatasource
 from apps.system.crud.assistant import AssistantOutDsFactory
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser
@@ -826,3 +826,135 @@ def get_old_questions(session: SessionDep, datasource: int, current_user: Curren
     for r in result:
         records.append(r.question)
     return records
+
+
+def _parse_error_message(error_raw: str | None) -> str:
+    """从 ChatRecord.error 解析出可读的报错信息。可能为 JSON { type, traceback }。"""
+    if not error_raw or not error_raw.strip():
+        return ""
+    try:
+        obj = orjson.loads(error_raw)
+        if isinstance(obj, dict) and obj.get("type") == "exec-sql-err":
+            return (obj.get("traceback") or "").strip()
+        return error_raw.strip()
+    except Exception:
+        return error_raw.strip()
+
+
+def _extract_analysis_content(analysis_raw: str | None) -> str:
+    """从 ChatRecord.analysis 中提取数据分析正文（供反馈「分析过程有误」时存储）。"""
+    if not analysis_raw or not analysis_raw.strip():
+        return ""
+    raw = analysis_raw.strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            obj = orjson.loads(raw)
+            content = obj.get("content") if isinstance(obj, dict) else None
+            return (content or "").strip()
+        except Exception:
+            pass
+    return raw
+
+
+def create_error_query_record(
+    session: SessionDep,
+    record_id: int,
+    current_user: CurrentUser,
+    feedback_reason: str,
+) -> ErrorQueryRecord:
+    """用户点踩后写入反馈记录。分析过程有误→记录数据分析文本；查询无结果/数据不准确→记录生成 SQL。"""
+    stmt = select(
+        ChatRecord.id,
+        ChatRecord.chat_id,
+        ChatRecord.question,
+        ChatRecord.sql,
+        ChatRecord.analysis,
+        ChatRecord.error,
+        ChatRecord.create_by,
+    ).where(
+        and_(ChatRecord.id == record_id, ChatRecord.create_by == current_user.id)
+    )
+    row = session.execute(stmt).first()
+    if not row:
+        raise Exception("Permission denied or record not found")
+
+    if feedback_reason == "wrong_analysis":
+        analysis_text = _extract_analysis_content(row.analysis)
+        sql_value = ""
+    else:
+        analysis_text = ""
+        sql_value = row.sql or ""
+
+    rec = ErrorQueryRecord(
+        record_id=record_id,
+        chat_id=row.chat_id,
+        question=row.question or "",
+        sql=sql_value,
+        analysis_text=analysis_text,
+        error_message=_parse_error_message(row.error),
+        feedback_reason=feedback_reason,
+        create_by=current_user.id,
+        create_time=datetime.datetime.now(),
+    )
+    session.add(rec)
+    session.flush()
+    session.refresh(rec)
+    session.commit()
+    return rec
+
+
+def list_error_query_records_pager(
+    session: SessionDep,
+    page_num: int,
+    page_size: int,
+    status: str | None = None,
+    feedback_reason: str | None = None,
+):
+    """分页查询反馈记录（管理员）。status/feedback_reason 为空则不过滤。返回 (list[ErrorQueryRecord], total)。"""
+    from sqlalchemy import func
+    base = select(ErrorQueryRecord)
+    if status and status in ("pending", "resolved"):
+        base = base.where(ErrorQueryRecord.status == status)
+    if feedback_reason and feedback_reason in ("no_result", "inaccurate_data", "wrong_analysis"):
+        base = base.where(ErrorQueryRecord.feedback_reason == feedback_reason)
+    count_stmt = select(func.count()).select_from(ErrorQueryRecord)
+    if status and status in ("pending", "resolved"):
+        count_stmt = count_stmt.where(ErrorQueryRecord.status == status)
+    if feedback_reason and feedback_reason in ("no_result", "inaccurate_data", "wrong_analysis"):
+        count_stmt = count_stmt.where(ErrorQueryRecord.feedback_reason == feedback_reason)
+    total = session.execute(count_stmt).scalar() or 0
+    stmt = (
+        base.order_by(ErrorQueryRecord.create_time.desc())
+        .offset((page_num - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = session.execute(stmt).scalars().all()
+    return list(rows), total
+
+
+def delete_error_query_record(session: SessionDep, record_id: int) -> bool:
+    """删除一条反馈记录（仅管理员）。"""
+    rec = session.get(ErrorQueryRecord, record_id)
+    if not rec:
+        return False
+    session.delete(rec)
+    session.commit()
+    return True
+
+
+def update_error_query_record_status(
+    session: SessionDep,
+    record_id: int,
+    status: str,
+) -> bool:
+    """更新反馈记录的处理状态（仅管理员）。status: pending | resolved。"""
+    if status not in ("pending", "resolved"):
+        return False
+    stmt = (
+        update(ErrorQueryRecord)
+        .where(ErrorQueryRecord.id == record_id)
+        .values(status=status)
+    )
+    result = session.execute(stmt)
+    session.commit()
+    return result.rowcount > 0

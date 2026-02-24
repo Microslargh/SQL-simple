@@ -24,6 +24,7 @@ import Appearance from '@/views/system/appearance/index.vue'
 import Permission from '@/views/system/permission/index.vue'
 import User from '@/views/system/user/User.vue'
 import Workspace from '@/views/system/workspace/index.vue'
+import ErrorQueryRecord from '@/views/system/errorQueryRecord/index.vue'
 import Page401 from '@/views/error/index.vue'
 import Home from '@/views/home/index.vue'
 import OAuth2Callback from '@/views/oauth2/callback.vue'
@@ -190,6 +191,16 @@ export const routes = [
           title: t('user.workspace'),
           iconActive: 'workspace',
           iconDeActive: 'noWorkspace',
+        },
+      },
+      {
+        path: 'error-query-record',
+        name: 'error-query-record',
+        component: ErrorQueryRecord,
+        meta: {
+          title: '反馈空间',
+          iconActive: 'chat',
+          iconDeActive: 'noChat',
         },
       },
       {

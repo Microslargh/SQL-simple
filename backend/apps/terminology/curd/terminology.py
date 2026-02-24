@@ -16,6 +16,7 @@ from apps.terminology.models.terminology_model import Terminology, TerminologyIn
 from common.core.config import settings
 from common.core.deps import SessionDep, Trans
 from common.utils.embedding_threads import run_save_terminology_embeddings
+from common.utils.embedding_utils import ensure_embedding_dimension
 
 
 def page_terminology(session: SessionDep, current_page: int = 1, page_size: int = 10, name: Optional[str] = None,
@@ -444,7 +445,7 @@ def save_embeddings(session: Session, ids: List[int]):
         results = model.embed_documents(_words_list)
 
         for index in range(len(results)):
-            item = results[index]
+            item = ensure_embedding_dimension(results[index])
             stmt = update(Terminology).where(and_(Terminology.id == _list[index].id)).values(embedding=item)
             session.execute(stmt)
             session.commit()
@@ -531,6 +532,7 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
                 model = EmbeddingModelCache.get_model()
 
                 embedding = model.embed_query(word)
+                embedding = ensure_embedding_dimension(embedding)
 
                 if datasource is not None:
                     results = session.execute(text(embedding_sql_with_datasource),

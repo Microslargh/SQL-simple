@@ -110,6 +110,29 @@ class ChatRecord(SQLModel, table=True):
     predict_record_id: int = Field(sa_column=Column(BigInteger, nullable=True))
 
 
+# 点踩反馈原因：查询无结果 / 数据不准确 / 分析过程有误
+class ErrorQueryFeedbackReason:
+    NO_RESULT = "no_result"           # 查询无结果
+    INACCURATE_DATA = "inaccurate_data"  # 查询到的数据不准确
+    WRONG_ANALYSIS = "wrong_analysis"     # 分析过程有误
+
+
+class ErrorQueryRecord(SQLModel, table=True):
+    """反馈空间：用户点踩后写入，供运维在系统管理中查看与标记处理状态。"""
+    __tablename__ = "error_query_record"
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    record_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联的 chat_record.id")
+    chat_id: int = Field(sa_column=Column(BigInteger, nullable=False))
+    question: str = Field(sa_column=Column(Text, nullable=True), description="用户提出的问题")
+    sql: str = Field(sa_column=Column(Text, nullable=True), description="生成的 SQL（仅当反馈原因为查询无结果/数据不准确时记录）")
+    analysis_text: str = Field(sa_column=Column(Text, nullable=True), description="数据分析内容（仅当反馈原因为分析过程有误时记录）")
+    error_message: str = Field(sa_column=Column(Text, nullable=True), description="报错信息")
+    feedback_reason: str = Field(sa_column=Column(Text, nullable=True), description="点踩原因: no_result | inaccurate_data | wrong_analysis")
+    status: str = Field(sa_column=Column(Text, nullable=True, default="pending"), description="处理状态: pending | resolved")
+    create_by: int = Field(sa_column=Column(BigInteger, nullable=True))
+    create_time: datetime = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
+
+
 class ChatRecordResult(BaseModel):
     id: Optional[int] = None
     chat_id: Optional[int] = None

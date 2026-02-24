@@ -1,16 +1,19 @@
 import asyncio
 import io
+from typing import Optional
 
 import numpy as np
 import orjson
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import and_, select
 from common.utils.utils import SQLBotLogUtil
 
 from apps.chat.curd.chat import list_chats, get_chat_with_records, create_chat, rename_chat, \
-    delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, get_chat_record_by_id
+    delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, get_chat_record_by_id, \
+    create_error_query_record
 from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, ExcelData
 from apps.chat.task.llm import LLMService
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser, Trans
@@ -101,6 +104,27 @@ async def start_chat(session: SessionDep, current_user: CurrentUser):
             status_code=500,
             detail=str(e)
         )
+
+
+class FeedbackBody(BaseModel):
+    record_id: int
+    is_like: bool = True
+    reason: Optional[str] = None  # no_result | inaccurate_data | wrong_analysis，点踩时必填
+
+
+@router.post("/feedback")
+async def submit_feedback(session: SessionDep, current_user: CurrentUser, body: FeedbackBody):
+    """对话反馈：点赞或点踩。点踩时需传 reason，系统将问题、SQL、报错写入错误查询记录供运维查看。"""
+    if body.is_like:
+        return {"ok": True, "message": "感谢反馈"}
+    reason = (body.reason or "").strip()
+    if reason not in ("no_result", "inaccurate_data", "wrong_analysis"):
+        raise HTTPException(status_code=400, detail="点踩时请选择原因：no_result / inaccurate_data / wrong_analysis")
+    try:
+        create_error_query_record(session, body.record_id, current_user, feedback_reason=reason)
+        return {"ok": True, "message": "反馈已记录，我们会尽快处理"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/recommend_questions/{chat_record_id}")

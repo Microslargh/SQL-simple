@@ -15,6 +15,7 @@ from apps.template.generate_chart.generator import get_base_data_training_templa
 from common.core.config import settings
 from common.core.deps import SessionDep, Trans
 from common.utils.embedding_threads import run_save_data_training_embeddings
+from common.utils.embedding_utils import ensure_embedding_dimension
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +222,7 @@ def save_embeddings(session: Session, ids: List[int]):
         results = model.embed_documents(_question_list)
 
         for index in range(len(results)):
-            item = results[index]
+            item = ensure_embedding_dimension(results[index])
             stmt = update(DataTraining).where(and_(DataTraining.id == _list[index].id)).values(embedding=item)
             session.execute(stmt)
             session.commit()
@@ -311,6 +312,7 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
 
             embedding = model.embed_query(question)
             logger.info(f"[数据训练检索] 问题embedding向量已生成，向量维度: {len(embedding)}")
+            embedding = ensure_embedding_dimension(embedding)
 
             results = session.execute(text(embedding_sql),
                                       {'embedding_array': str(embedding), 'oid': oid, 'datasource': datasource})

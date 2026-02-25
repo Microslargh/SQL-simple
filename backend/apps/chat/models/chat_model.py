@@ -268,11 +268,28 @@ class AiModelQuestion(BaseModel):
         return get_datasource_template()['user'].format(question=self.question, data=datasource_list)
 
     def guess_sys_question(self):
-        return get_guess_question_template()['system'].format(lang=self.lang)
+        # 容错：system 模板中若包含 {schema}/{question}/{old_questions} 等占位符，避免 KeyError 中断
+        class _SafeDict(dict):
+            def __missing__(self, key):
+                return "{" + key + "}"
+
+        tpl = get_guess_question_template()['system']
+        try:
+            return tpl.format_map(_SafeDict(lang=self.lang))
+        except Exception:
+            # 未转义花括号等模板语法问题兜底
+            return tpl
 
     def guess_user_question(self, old_questions: str = "[]"):
-        return get_guess_question_template()['user'].format(question=self.question, schema=self.db_schema,
-                                                            old_questions=old_questions)
+        tpl = get_guess_question_template()['user']
+        try:
+            return tpl.format(question=self.question, schema=self.db_schema, old_questions=old_questions)
+        except Exception:
+            # 兜底：避免模板格式问题导致猜你想问失败
+            return (tpl
+                    .replace("{question}", self.question or "")
+                    .replace("{schema}", self.db_schema or "")
+                    .replace("{old_questions}", old_questions or "[]"))
 
     def filter_sys_question(self):
         return get_permissions_template()['system'].format(lang=self.lang, engine=self.engine)

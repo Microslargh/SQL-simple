@@ -44,7 +44,7 @@ except ImportError:
     find_custom_prompts = None
     CustomPromptTypeEnum = None
 from apps.data_training.curd.data_training import get_training_template, get_training_template_with_data
-from apps.datasource.crud.datasource import get_table_schema, get_table_schema_for_tables
+from apps.datasource.crud.datasource import get_table_schema, get_table_schema_for_tables, get_table_schema_for_guess
 from apps.datasource.crud.permission import get_row_permission_filters, is_normal_user
 from apps.datasource.embedding.ds_embedding import get_ds_embedding
 from apps.datasource.models.datasource import CoreDatasource
@@ -704,20 +704,150 @@ class LLMService:
                                                                 reasoning_content=full_thinking_text,
                                                                 token_usage=token_usage)
 
+    @staticmethod
+    def _parse_recommended_questions(content: str) -> List[str]:
+        if not content or not content.strip():
+            return []
+        try:
+            json_str = extract_nested_json(content)
+            if not json_str:
+                return []
+            parsed = orjson.loads(json_str)
+            if not isinstance(parsed, list):
+                return []
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _extract_sql_text(raw_text: str) -> str:
+        if not raw_text:
+            return ""
+        text = raw_text.strip()
+        # 兼容 ```sql ... ``` 代码块
+        if "```" in text:
+            blocks = re.findall(r"```(?:sql)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+            if blocks:
+                text = blocks[0].strip()
+        # 兼容 JSON {"sql":"..."}
+        try:
+            maybe_obj = orjson.loads(text)
+            if isinstance(maybe_obj, dict) and maybe_obj.get("sql"):
+                text = str(maybe_obj.get("sql")).strip()
+        except Exception:
+            pass
+        return text
+
+    def _validate_recommend_question_sql(self, question: str) -> bool:
+        """
+        轻量预验证：为推荐问题生成一条只读 SQL 并尝试执行。
+        仅当配置 GUESS_SQL_VALIDATE_ENABLED=True 时生效。
+        """
+        if not self.ds:
+            return False
+        schema = self.chat_question.db_schema or ""
+        engine = self.chat_question.engine or ""
+        system_prompt = (
+            "你是SQL生成器。只返回一条可执行的只读SQL，不要解释，不要Markdown，不要多条语句。"
+            "如果无法生成，请只返回 EMPTY。"
+        )
+        user_prompt = (
+            f"数据库引擎: {engine}\n"
+            f"Schema:\n{schema}\n\n"
+            f"问题: {question}\n"
+            "要求：仅返回 SELECT/WITH 开头的 SQL。"
+        )
+        try:
+            resp = self.llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
+            resp_text = ""
+            if hasattr(resp, "content"):
+                resp_text = resp.content if isinstance(resp.content, str) else str(resp.content)
+            sql = self._extract_sql_text(resp_text)
+            if not sql:
+                return False
+            sql_head = sql.lstrip().lower()
+            if not (sql_head.startswith("select") or sql_head.startswith("with")):
+                return False
+            from apps.db.db import exec_sql
+            result = exec_sql(self.ds, sql, True)
+            if isinstance(result, dict) and result.get("error"):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _apply_guess_sql_validation(self, full_guess_text: str) -> str:
+        if not settings.GUESS_SQL_VALIDATE_ENABLED:
+            return full_guess_text
+        questions = self._parse_recommended_questions(full_guess_text)
+        if not questions:
+            return full_guess_text
+        _async_log_util.info(f"[猜你想问-预验证] 原始推荐问题数量: {len(questions)}")
+        validated: List[str] = []
+        for q in questions:
+            if self._validate_recommend_question_sql(q):
+                validated.append(q)
+            else:
+                _async_log_util.info(f"[猜你想问-预验证] 丢弃不可执行问题: {q}")
+        _async_log_util.info(f"[猜你想问-预验证] 通过验证数量: {len(validated)}")
+        return orjson.dumps(validated).decode() if validated else "[]"
+
     def generate_recommend_questions_task(self):
 
-        # get schema
-        if self.ds and not self.chat_question.db_schema:
-            self.chat_question.db_schema = self.out_ds_instance.get_db_schema(
-                self.ds.id) if self.out_ds_instance else get_table_schema(session=self.session,
-                                                                          current_user=self.current_user, ds=self.ds,
-                                                                          question=self.chat_question.question,
-                                                                          embedding=False)
+        # get schema（猜你想问）：优先取「当前对话 SQL 用到的表」的表结构；无 SQL 时再回退检索
+        if self.ds:
+            if self.out_ds_instance:
+                self.chat_question.db_schema = self.out_ds_instance.get_db_schema(self.ds.id)
+            else:
+                sql_used = (self.record.sql or "").strip()
+                table_names = _parse_table_names_from_sql(sql_used) if sql_used else []
+                _async_log_util.info(
+                    f"[猜你想问] 当前记录 SQL 长度: {len(sql_used)}, 解析出表数量: {len(table_names)}"
+                )
+                if table_names:
+                    self.chat_question.db_schema = get_table_schema_for_tables(
+                        session=self.session,
+                        current_user=self.current_user,
+                        ds=self.ds,
+                        table_names=table_names,
+                    )
+                    _async_log_util.info(f"[猜你想问] 表结构来源=SQL用表, 解析表: {table_names}")
+                else:
+                    # 无 SQL 或解析不到表（如首轮）时回退为检索
+                    self.chat_question.db_schema = get_table_schema_for_guess(
+                        session=self.session,
+                        current_user=self.current_user,
+                        ds=self.ds,
+                        question=self.chat_question.question,
+                    )
+                    _async_log_util.info("[猜你想问] 表结构来源=检索(无SQL或未解析到表)")
+
+        schema_input = self.chat_question.db_schema or ""
+        _async_log_util.info(f"[猜你想问] 表结构(schema)输入长度: {len(schema_input)} 字符")
+        _async_log_util.info(f"[猜你想问] 表结构(schema)内容:\n{schema_input}")
 
         guess_msg: List[Union[BaseMessage, dict[str, Any]]] = []
         guess_msg.append(SystemMessage(content=self.chat_question.guess_sys_question()))
 
-        old_questions = list(map(lambda q: q.strip(), get_old_questions(self.session, self.record.datasource, self.current_user)))
+        try:
+            raw_old_questions = get_old_questions(self.session, self.record.datasource, self.current_user) or []
+        except Exception as e:
+            _async_log_util.error(f"[猜你想问] 获取以往提问失败，回退为空列表: {e}", exc_info=True)
+            raw_old_questions = []
+
+        old_questions: List[str] = []
+        for q in raw_old_questions:
+            if q is None:
+                continue
+            try:
+                q_str = str(q).strip()
+                if q_str:
+                    old_questions.append(q_str)
+            except Exception:
+                continue
+        _async_log_util.info(f"[猜你想问] 以往提问(old_questions)数量: {len(old_questions)}")
+        _async_log_util.info(f"[猜你想问] 以往提问(old_questions)内容: {old_questions}")
+
         guess_msg.append(
             HumanMessage(content=self.chat_question.guess_user_question(orjson.dumps(old_questions).decode())))
 
@@ -741,6 +871,9 @@ class LLMService:
             if chunk.get('reasoning_content'):
                 full_thinking_text += chunk.get('reasoning_content')
             yield chunk
+
+        # 可选高级优化：推荐问题 SQL 预执行验证（默认关闭）
+        full_guess_text = self._apply_guess_sql_validation(full_guess_text)
 
         guess_msg.append(AIMessage(full_guess_text))
 

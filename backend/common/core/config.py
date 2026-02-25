@@ -125,6 +125,10 @@ class Settings(BaseSettings):
 
     TABLE_EMBEDDING_ENABLED: bool = Field(default=False, description="是否启用表结构的embedding检索筛选")
     TABLE_EMBEDDING_COUNT: int = Field(default=10, description="表embedding检索返回的最大表数量")
+    GUESS_SCHEMA_TABLE_COUNT: int = Field(default=5, description="猜你想问场景 schema pruning 返回表数量（建议 3-5）")
+    GUESS_SCHEMA_INCLUDE_VALUE_HINTS: bool = Field(default=True, description="猜你想问 schema 是否注入深表字段值域示例")
+    GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")
+    GUESS_SQL_VALIDATE_ENABLED: bool = Field(default=False, description="是否启用猜你想问 SQL 预验证（会增加延迟）")
 
     # OAuth2 SSO 配置
     OAUTH2_ENABLED: bool = True  # 是否启用OAuth2单点登录（默认禁用，需要手动启用）

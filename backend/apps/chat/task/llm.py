@@ -34,6 +34,11 @@ from apps.chat.models.chat_model import ChatQuestion, ChatRecord, Chat, RenameCh
 from apps.chat.context import ContextStateManager
 from apps.chat.context.question_enhancer import is_any_follow_up
 from apps.chat.utils.table_selection_rule import generate_table_selection_rule
+from apps.chat.utils.table_data_analyzer import (
+    build_detail_sample,
+    compute_table_summary,
+    format_summary_for_prompt,
+)
 from sqlbot_xpack.license.license_manage import SQLBotLicenseUtil
 # 兼容旧版本 sqlbot-xpack，custom_prompt 模块可能不存在
 try:
@@ -577,15 +582,79 @@ class LLMService:
         self.chat_question.fields = orjson.dumps(fields).decode()
         data = get_chat_chart_data(self.session, self.record.id, self.current_user)
         raw_data = data.get('data') if isinstance(data, dict) else None
+        field_names = data.get('fields') if isinstance(data, dict) else None
         total_rows = len(raw_data) if isinstance(raw_data, list) else 0
         self.chat_question.data_total_rows = str(total_rows)
-        # 数据量过大时只传前 N 条给模型，避免上下文被截断导致模型只看到部分行而误计总数；总数由 data_total_rows 提供（模型支持 256K 上下文，阈值设大一些）
-        ANALYSIS_DATA_ROW_LIMIT = 8000
-        if total_rows > ANALYSIS_DATA_ROW_LIMIT:
-            self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
-            _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析，总数以 data_total_rows 为准")
+
+        # 表格数据智能预分析：对「分类+数值」结构预计算总数、分项明细，避免模型长表遗漏
+        self.chat_question.data_summary = ""
+        summary = None
+        if raw_data and len(raw_data) > 0:
+            try:
+                chart_info = get_chart_config(self.session, self.record.id, self.current_user)
+                summary = compute_table_summary(raw_data, field_names, chart_info)
+                if summary.get("has_numeric_breakdown"):
+                    self.chat_question.data_summary = format_summary_for_prompt(summary)
+                    _async_log_util.info(
+                        f"[数据分析] 已预计算统计量: row_count={summary.get('row_count')}, "
+                        f"column_sums={summary.get('column_sums')}, breakdown_rows={len(summary.get('breakdown_rows', []))}"
+                    )
+            except Exception as e:
+                _async_log_util.warning(f"[数据分析] 预分析失败，将不注入 data_summary: {e}", exc_info=True)
+
+        # 当预分析成功时：传聚合结果 + 明细样本，兼顾数值准确与分析深度
+        if summary and summary.get("has_numeric_breakdown") and summary.get("breakdown_rows"):
+            breakdown = summary["breakdown_rows"]
+            if breakdown and isinstance(breakdown[0], tuple):
+                cat_key = summary.get("category_col") or "产业"
+                compact_data = [{cat_key: name, "户数": cnt} for name, cnt in breakdown]
+                category_col = summary.get("category_col")
+                detail_sample_rows: List[Dict] = []
+                detail_sample_text = ""
+                if category_col and raw_data:
+                    detail_sample_rows, detail_sample_text = build_detail_sample(
+                        raw_data, category_col, breakdown, max_per_category=4, max_total=120
+                    )
+                self.chat_question.data_summary = format_summary_for_prompt(summary, detail_sample_text)
+                data_payload: Dict[str, Any] = {"aggregates": compact_data}
+                if detail_sample_rows:
+                    data_payload["detail_sample"] = detail_sample_rows
+                self.chat_question.data = orjson.dumps(data_payload).decode()
+                total_val = summary.get("column_sums") or {}
+                total_val = total_val.get("户数") or next(iter(total_val.values()), summary.get("row_count", total_rows))
+                self.chat_question.data_total_rows = str(total_val)
+                _async_log_util.info(
+                    f"[数据分析] 已传聚合+明细样本: {len(compact_data)} 个分类, {len(detail_sample_rows)} 条样本, 总数={total_val}"
+                )
+            elif breakdown and isinstance(breakdown[0], dict):
+                compact_data = breakdown
+                if summary.get("is_detail_only"):
+                    self.chat_question.data_summary = format_summary_for_prompt(summary)
+                    self.chat_question.data = orjson.dumps(compact_data).decode()
+                    self.chat_question.data_total_rows = str(len(raw_data) if raw_data else 0)
+                    _async_log_util.info(f"[数据分析] 纯明细表模式: {len(compact_data)} 条样本, 总数={len(raw_data)}")
+                else:
+                    self.chat_question.data = orjson.dumps(compact_data).decode()
+                    total_val = summary.get("column_sums") or {}
+                    total_val = total_val.get("户数") or next(iter(total_val.values()), summary.get("row_count", total_rows))
+                    self.chat_question.data_total_rows = str(total_val)
+                    self.chat_question.data_summary = format_summary_for_prompt(summary)
+                    _async_log_util.info(f"[数据分析] 已用预分析结果替换原始数据，共 {len(compact_data)} 个分类，总数={total_val}")
+            else:
+                compact_data = []
+                self.chat_question.data = orjson.dumps(compact_data).decode()
+                self.chat_question.data_summary = format_summary_for_prompt(summary)
+                self.chat_question.data_total_rows = str(summary.get("row_count", total_rows))
         else:
-            self.chat_question.data = orjson.dumps(raw_data).decode() if raw_data is not None else "[]"
+            if raw_data and total_rows > 0 and (not summary or not summary.get("has_numeric_breakdown")):
+                keys_preview = list((raw_data[0] or {}).keys())[:8] if raw_data else []
+                _async_log_util.info(f"[数据分析] 预分析未命中，将传原始数据。行数={total_rows}, 列名={keys_preview}")
+            ANALYSIS_DATA_ROW_LIMIT = 8000
+            if total_rows > ANALYSIS_DATA_ROW_LIMIT:
+                self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
+                _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析")
+            else:
+                self.chat_question.data = orjson.dumps(raw_data).decode() if raw_data is not None else "[]"
         
         # 传递SQL信息给数据分析模块，用于正确识别时间范围
         if self.record and self.record.sql:

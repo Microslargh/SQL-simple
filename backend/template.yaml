@@ -329,6 +329,11 @@ template:
           **法人户数时间**：当用户问题涉及「法人户数」「集团法人户数」且未在问题中指定具体时间时，SQL 中 create_date（或同类时间字段）的过滤条件必须与 <background-infos> 中 <current-time> 的年月一致，例如 <current-time> 为 2026-01-31 时使用 create_date LIKE '2026-01%'，不得使用其他月份。
         </rule>
         <rule>
+          **EAV/指标表结构**：若表中有「指标名称」「指标值」类字段，表示采用 EAV 结构。用户问「XX指标」时，需：
+          1) 在指标名称字段中筛选包含该指标名的行（如 WHERE 指标名称 LIKE '%利润%' 或 = '利润总额'）；
+          2) 取对应行的指标值字段作为结果。不要假设指标名是列名。
+        </rule>
+        <rule>
           生成的SQL必须符合<db-engine>内提供数据库引擎的规范
         </rule>
         <rule>
@@ -781,6 +786,20 @@ template:
         7. **总数必须使用<data-total-rows>（必须遵守）**：
          - 若存在<data-total-rows>，表示查询结果的真实总行数。涉及「总数」「共X家」「共X条」「X条数据」等结论时，**必须**使用<data-total-rows>中的数值，**不得**根据<data>中的行数自行计数。
          - 原因：<data>可能因长度限制仅包含前N条，模型只能看到部分行，若自行计数会得到错误总数。
+
+        8. **分项之和与总数必须一致（必须遵守）**：
+         - 当数据为「分类+数值」结构（如各产业户数、各板块营收等）时，若分点列出各分类的数值，**必须覆盖<data>中的每一行**，不得遗漏任何分类。
+         - 分项数值之和必须等于所述总数。
+         - 正确做法：逐行核对<data-summary>或<data>，**仅列举其中实际存在的分类**，不得添加数据中不存在的分类。
+         - **禁止编造「其他」「未分类」等**：若<data-summary>或<data>中未出现某分类名，则**绝对不得**在分析中提及该分类。不得为凑齐总数而虚构「其他」「未分类」「其余」等类别。
+
+        9. **优先使用<data-summary>与<data>（必须遵守）**：
+         - 若存在<data-summary>块且非空，表示系统已对表格做了预聚合。
+         - <data>可能为两种格式：① 直接为数组（聚合结果或明细样本）；② 对象含 aggregates（汇总）和 detail_sample（明细样本）。
+         - 当<data>为对象时：aggregates 为分类+户数汇总（数值权威），detail_sample 为各分类下的代表企业/明细行，供深入分析时引用企业名、属性等。
+         - **总数、各分类户数**必须严格采用 aggregates 或 <data-summary> 中的数值，不得自行修改或估算。
+         - 分点列举时，**仅可列举实际出现的分类**，不得添加、遗漏或编造任何分类。
+         - 可结合 detail_sample 中的企业名、属性等做深入分析，如提及代表性企业、交叉属性特征等。
       </Output Rules>
       
       <Info>
@@ -800,6 +819,9 @@ template:
       {data}
       </data>
       <data-total-rows>{data_total_rows}</data-total-rows>
+      <data-summary>
+      {data_summary}
+      </data-summary>
       {sql_info}
   question_enhance:
     system: |

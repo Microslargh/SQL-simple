@@ -104,21 +104,49 @@ export class Table extends BaseChart {
     return !isNaN(num) && isFinite(num)
   }
 
-  // 计算汇总行数据
+  /**
+   * 判断列是否为「数值编码的分类列」，不应参与汇总求和。
+   * 如：注册状态 0/1、境内境外 0/1、与国有企业关系 1/2/3/4、合并标志 1/2 等。
+   */
+  private isNumericCodedCategoryColumn(col: ChartAxis, data: Array<ChartData>): boolean {
+    const values = data.map(row => row[col.value]).filter(v => this.isNumericField(v))
+    if (values.length === 0) return false
+
+    const uniqueCount = new Set(values.map(v => String(Number(v)))).size
+    const colName = (col.name || col.value || '').toLowerCase()
+
+    // 列名包含类型/状态/标志/关系等，视为分类列
+    const categoryKeywords = ['状态', '标志', '关系', '境内', '境外', '合并', '类型', '注册', '出资']
+    if (categoryKeywords.some(kw => colName.includes(kw.toLowerCase()))) {
+      return true
+    }
+
+    // 唯一值数量在 2~20 之间，多为编码分类（0/1、1/2/3/4 等），不汇总
+    if (uniqueCount >= 2 && uniqueCount <= 15) {
+      return true
+    }
+
+    return false
+  }
+
+  // 计算汇总行数据（数值编码的分类列不参与求和）
   private calculateSummaryRow(axis: Array<ChartAxis>, data: Array<ChartData>): ChartData {
     const summaryRow: ChartData = {
       __index__: '汇总',
     }
     
     axis.forEach((col) => {
+      if (this.isNumericCodedCategoryColumn(col, data)) {
+        summaryRow[col.value] = '-'
+        return
+      }
+
       const values = data.map(row => row[col.value]).filter(v => this.isNumericField(v))
       
       if (values.length > 0) {
-        // 计算数值字段的总和
         const sum = values.reduce((acc, val) => acc + Number(val), 0)
         summaryRow[col.value] = this.formatNumber(sum)
       } else {
-        // 非数值字段显示空或"汇总"
         summaryRow[col.value] = ''
       }
     })

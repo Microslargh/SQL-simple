@@ -245,18 +245,18 @@ class LLMService:
 
     def _get_effective_current_time(self) -> str:
         """获取用于 prompt 的 current_time。
-        若用户提问与法人户数相关且未明确时间，则从 default.dws_cqs_enterprise_query_view_full
-       （is_exit_press_reduce=是）取 create_date 最新值作为 current_time，表示当前表支持查询的最新时间；
-        否则使用系统当前时间。
+        若回答该问题须用到 cqs 表且问题没有明确指定时间时，则从数据源取 create_date 最新值，
+        不适用系统时间（因数据更新滞后于实际时间约一个月）；否则使用系统当前时间。
         """
         default_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not self.ds:
             return default_time
-        question = (self.chat_question.question or '').strip()
-        # 法人户数相关关键词
-        if '法人户数' not in question and '集团法人户数' not in question and '户数' not in question and '法人' not in question:
+        # 若 schema 中不含 cqs 表，说明该问题不涉及法人户数/企业查询，使用系统时间
+        schema = (self.chat_question.db_schema or '')
+        if 'dws_cqs' not in schema:
             return default_time
         # 问题中已包含明确时间则用系统时间
+        question = (self.chat_question.question or '').strip()
         time_keywords = ['时间', '日期', '月份', '年份', '年', '月', '日', '去年', '今年', '前年']
         if any(kw in question for kw in time_keywords):
             return default_time
@@ -269,7 +269,7 @@ class LLMService:
             )
             result = exec_sql(ds=self.ds, sql=sql)
             if not result or not result.get('data') or not result['data'][0]:
-                _async_log_util.info(f"[current_time] 法人户数视图无结果，使用系统时间: {default_time}")
+                _async_log_util.info(f"[current_time] cqs 视图无结果，使用系统时间: {default_time}")
                 return default_time
             row = result['data'][0]
             # 兼容不同库返回的列名（latest / Latest / max(create_date) 等）
@@ -277,7 +277,7 @@ class LLMService:
             if raw is None and isinstance(row, dict):
                 raw = next((v for k, v in row.items() if v is not None), None)
             if raw is None:
-                _async_log_util.info(f"[current_time] 法人户数视图结果无有效值，使用系统时间: {default_time}")
+                _async_log_util.info(f"[current_time] cqs 视图结果无有效值，使用系统时间: {default_time}")
                 return default_time
             # 统一格式为 YYYY-MM-DD HH:MM:SS
             if isinstance(raw, datetime):
@@ -290,10 +290,10 @@ class LLMService:
                     effective = f'{s[:10]} 00:00:00' if len(s) <= 10 else s[:19]
                 else:
                     effective = default_time
-            _async_log_util.info(f"[current_time] 法人户数未指定时间，使用视图最新 create_date 作为当前时间: {effective}")
+            _async_log_util.info(f"[current_time] cqs 表场景，使用视图最新 create_date 作为当前时间: {effective}")
             return effective
         except Exception as e:
-            _async_log_util.info(f"[current_time] 从法人户数视图取最新 create_date 失败，使用系统时间: {default_time}, 错误: {e}")
+            _async_log_util.info(f"[current_time] 从 cqs 视图取最新 create_date 失败，使用系统时间: {default_time}, 错误: {e}")
             return default_time
 
     def init_messages(self):
@@ -350,6 +350,21 @@ class LLMService:
                 rule_text = table_selection_info["rule_text"]
                 self.chat_question.custom_prompt = f"{original_custom_prompt}\n\n{rule_text}" if original_custom_prompt else rule_text
                 _async_log_util.info(f"[表选择规则] 已生成并注入规则，表类型: {table_selection_info['table_type']}, 表名: {table_selection_info['table_name']}")
+
+        # jq_zbval 表：公司字段过滤、公司/集团查询规则
+        schema = (self.chat_question.db_schema or '')
+        if 'jq_zbval' in schema:
+            jq_zbval_rule = (
+                "<rule>\n"
+                "当 SQL 涉及 dws_cgn_jq_zbval_year 或 dws_cgn_jq_zbval_month 表时：\n"
+                "1) 必须对 sys_unittitle 添加过滤，排除脏数据：AND sys_unittitle NOT LIKE '%注销%' AND sys_unittitle NOT LIKE '%虚拟%' AND sys_unittitle NOT LIKE '%清除%'。\n"
+                "2) 查某个公司的经营情况指标时：因表中公司名称不统一（部分需加「本部」后缀），使用 IN 同时匹配两种形式，例如 sys_unittitle IN ('红沿河公司', '红沿河公司（本部）')。\n"
+                "3) 查集团层经营情况指标时：固定使用 sys_unittitle = '中国广核集团有限公司（合并）'。\n"
+                "</rule>"
+            )
+            original_custom_prompt = self.chat_question.custom_prompt or ""
+            self.chat_question.custom_prompt = f"{original_custom_prompt}\n\n{jq_zbval_rule}" if original_custom_prompt else jq_zbval_rule
+            _async_log_util.info("[jq_zbval] 已注入公司字段脏数据过滤规则")
         
         # add sys prompt
         self.sql_message.append(SystemMessage(content=self.chat_question.sql_sys_question()))

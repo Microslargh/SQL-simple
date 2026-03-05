@@ -9,6 +9,7 @@
 2. 明细表按分类 结构（如每行一家公司，含产业名称列）- 需按分类列聚合计数
 3. 纯明细表（公司名称|属性1|属性2|属性3）- 无数值列，按属性聚合或提供样本
 4. 数值编码的分类列：属性用数字表示（如境内境外 0/1，与国家出资企业关系 1全资2参股3控股4等）
+5. 字符串类型的分类列：属性用字符串表示（如境内境外「境内」「境外」，全资参股控股「全资」「参股」「控股」等）
 """
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
@@ -205,7 +206,7 @@ def _count_unique(data: List[Dict], key: str) -> int:
 def _detect_category_column_for_aggregation(
     data: List[Dict], keys: List[str], chart_config: Optional[Dict]
 ) -> Optional[str]:
-    """检测适合按聚合计数的分类列（如产业名称、板块等），含数值编码分类（0/1、1/2/3/4）"""
+    """检测适合按聚合计数的分类列（如产业名称、板块等），含数值编码（0/1、1/2/3/4）及字符串分类（境内境外、全资参股控股等）"""
     if not data or not keys:
         return None
     # 从图表配置取分类列时，必须校验唯一值数量：避免 axis.x=公司名称 导致 1099 个分类
@@ -230,8 +231,8 @@ def _detect_category_column_for_aggregation(
                         if uniq <= MAX_CATEGORY_FROM_CHART:
                             if not _is_numeric_column(data, v) or (2 <= uniq <= 50):
                                 return v
-    # 自动检测：非数值列 + 数值编码分类列（0/1、1/2/3/4 等，唯一值 2~50）
-    category_keywords = ("产业", "板块", "类型", "分类", "名称", "产业名", "属性", "关系", "境内", "境外", "出资", "plate", "bk", "org", "type", "category")
+    # 自动检测：非数值列 + 数值编码分类列（0/1、1/2/3/4）+ 字符串分类列（境内境外、全资参股控股等）
+    category_keywords = ("产业", "板块", "类型", "分类", "名称", "产业名", "属性", "关系","标识", "境内", "境外", "出资", "全资", "参股", "控股", "plate", "bk", "org", "type", "category")
     exclude_keywords = ("公司名", "company", "id", "code")  # 公司名、id 等通常为明细维度，排除高基数列
     candidates: List[Tuple[str, int, int]] = []  # (col, uniq_count, priority)
     for k in keys:

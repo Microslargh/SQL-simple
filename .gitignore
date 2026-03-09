@@ -12,6 +12,7 @@ develop-eggs/
 dist/
 downloads/
 my_model/
+backend/common/core/config.py
 eggs/
 .eggs/
 lib/
@@ -52,7 +53,7 @@ lerna-debug.log*
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
-
+backend/template.yaml
 # Frontend build outputs
 dist/
 dist-ssr/

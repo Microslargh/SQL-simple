@@ -10,7 +10,7 @@ from common.utils.utils import _async_log_util
 _FOLLOW_UP_MAX_LEN = 25
 
 def is_time_follow_up(question: str) -> bool:
-    """判断是否为「时间追问」：只换了时间、其余延续上一问。如「2024年的呢？」「去年的呢？」"""
+    """判断是否为「时间追问」：只换了时间、其余延续上一问。如「2024年的呢？」「去年的呢？」「7月的呢」"""
     if not question or len(question.strip()) > _FOLLOW_UP_MAX_LEN:
         return False
     q = question.strip()
@@ -21,6 +21,9 @@ def is_time_follow_up(question: str) -> bool:
     if re.match(r"^(\d{4}年)(的)?(呢)?[？?]?$", q):
         return True
     if len(q) <= 12 and "年" in q and "呢" in q:
+        return True
+    # 「X月的呢」：仅月份追问，年份从历史问题继承
+    if re.match(r"^\d{1,2}月的呢？?$", q):
         return True
     return False
 
@@ -174,9 +177,19 @@ class QuestionEnhancer:
         if not current_question or not history_question:
             return None
         q = current_question.strip()
+        new_year = None
+        new_month = None
         year_match = re.search(r"(\d{4})年", q)
+        month_only_match = re.match(r"^(\d{1,2})月的呢？?$", q)
         if year_match:
             new_year = year_match.group(1)
+        elif month_only_match:
+            new_month = month_only_match.group(1).zfill(2)
+            year_in_history = re.search(r"(\d{4})年", history_question)
+            if year_in_history:
+                new_year = year_in_history.group(1)
+            else:
+                new_year = str(datetime.now().year)
         elif "去年" in q:
             new_year = str(datetime.now().year - 1)
         elif "前年" in q:
@@ -187,9 +200,19 @@ class QuestionEnhancer:
             new_year = str(datetime.now().year)
         else:
             return None
-        def replace_year(m):
-            return new_year + m.group(2)
-        enhanced = re.sub(r"(\d{4})(年(?:底|末)?|年\d{1,2}月?)", replace_year, history_question, count=1)
+        if new_month:
+            # 「7月的呢」：用历史中的年份 + 当前月份替换历史中的年月；支持多种历史时间格式
+            enhanced = re.sub(r"(\d{4})年\d{1,2}月", f"{new_year}年{new_month}月", history_question, count=1)
+            if enhanced == history_question:
+                # 历史为「YYYYMM月份」时：保留年份，只换月份，如 202602月份 -> 202607月份
+                enhanced = re.sub(r"(\d{4})(\d{2})月份", lambda m: f"{m.group(1)}{new_month}月份", history_question, count=1)
+            if enhanced == history_question:
+                # 历史为「YYYYMM月」（无“份”）时同理
+                enhanced = re.sub(r"(\d{4})(\d{2})月(?!份)", lambda m: f"{m.group(1)}{new_month}月", history_question, count=1)
+        else:
+            def replace_year(m):
+                return new_year + m.group(2)
+            enhanced = re.sub(r"(\d{4})(年(?:底|末)?|年\d{1,2}月?)", replace_year, history_question, count=1)
         if enhanced != history_question:
             _async_log_util.info(f"[问题增强-时间追问] 原始: {current_question}, 补充后: {enhanced}")
             return enhanced

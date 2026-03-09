@@ -32,6 +32,7 @@ class StructuredContext:
     relevant_data_summary: Optional[str] = None  # 相关数据摘要（精简版）
     time_range: Optional[Dict[str, str]] = None  # 时间范围，如 {"start": "202501", "end": "202512"} 或 {"time": "202501"}
     history_sql: Optional[str] = None  # 完整的历史SQL（用于追问场景，提供表名和字段名参考）
+    slots_to_discard: List[str] = field(default_factory=list)  # 应丢弃的过滤条件（语义仲裁结果，如 is_consolidated）
     
     def has_content(self) -> bool:
         """检查是否有任何上下文内容"""
@@ -40,4 +41,5 @@ class StructuredContext:
                 self.intent_summary is not None or 
                 self.relevant_data_summary is not None or
                 self.time_range is not None or
-                self.history_sql is not None)
+                self.history_sql is not None or
+                len(self.slots_to_discard) > 0)

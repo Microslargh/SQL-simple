@@ -171,7 +171,17 @@
           </div>
         </div>
         <div v-else-if="computedMessages.length == 0 && loading" class="welcome-content-block">
-          <logo />
+          <div class="welcome-content">
+            <div class="greeting">
+              <el-icon size="32">
+                <logo_fold />
+              </el-icon>
+              {{ t('qa.greeting') }}
+            </div>
+            <el-icon class="is-loading" size="24">
+              <Loading />
+            </el-icon>
+          </div>
         </div>
         <el-scrollbar
           v-if="computedMessages.length > 0"
@@ -421,7 +431,7 @@ import icon_sidebar_outlined from '@/assets/svg/icon_sidebar_outlined.svg'
 import icon_replace_outlined from '@/assets/svg/icon_replace_outlined.svg'
 import icon_start_outlined from '@/assets/svg/icon_start_outlined.svg'
 import logo_fold from '@/assets/svg/logo-custom_small.svg'
-import logo from '@/assets/LOGO.svg'
+import { Loading } from '@element-plus/icons-vue'
 import icon_send_filled from '@/assets/svg/icon_send_filled.svg'
 import { useAssistantStore } from '@/stores/assistant'
 import { onClickOutside } from '@vueuse/core'

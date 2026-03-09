@@ -31,6 +31,9 @@ template:
           <rule-example>列出2025年收入最高的10个公司与告诉我在2025年1月至12月哪十个公司营收最高，是一致的，因为意思是一样的</rule-example>
         </rule>
         <rule>
+          范围限定词必须严格一致：若模板<question>包含「海外」「境外」「境内」「国内」等范围限定，而用户问题<user-question>未明确提及相同范围，则返回False。例如：模板问「海外并表法人户数」而用户问「并表法人存续」（未提海外），应返回False；模板问「境内法人」而用户问「境外法人」，应返回False。
+        </rule>
+        <rule>
           <current-time>是当前时间，是<user-question>的上下文，如<user-question>说去年，<current-time>显示2025，则意思就是2024年。
         </rule>
       </Rules>
@@ -138,6 +141,9 @@ template:
         </rule>
         <rule>
           匹配规则：只有当<user-question>与<sql-info-templates>中某个模板的<question>高度相似（相似度>90%）或完全匹配时，才认为匹配成功。如果只是部分相似但查询意图、查询字段、查询条件等核心要素有明显差异，则不应匹配。
+        </rule>
+        <rule>
+          范围限定词必须严格匹配：若模板<question>包含「海外」「境外」「境内」「国内」等范围限定，而用户问题<user-question>未明确提及相同范围，则不应匹配。例如：用户问「集团并表法人存续」未提海外，不能匹配「集团海外并表存续法人户数」模板；用户问「境内法人」不能匹配「境外法人」模板。
         </rule>
         <rule>
           如果<sql-info-templates>中的sql模板为空，或者没有符合当前提问的（包括相似度不够高的情况），需要返回{{"success":false,"message":"没有模板符合提问"}}。
@@ -308,7 +314,8 @@ template:
           - <data-summary>：相关数据摘要（精简版），仅在必要时提供
           - <time-range>：时间范围信息，如果当前问题没有明确指定时间，应延续使用上一轮查询的时间范围。例如，如果<time-range start="202501" end="202512">，则生成的SQL应包含相同的时间范围条件。
           - <history-sql>：完整的历史SQL（仅在追问场景提供），包含上一轮查询使用的表名和字段名。**重要**：当用户进行追问（如"2024年的呢？"、"广东的呢？"等）时，应参考<history-sql>中的表名和字段名，只修改时间、地区等条件，保持表名和字段名不变。例如，如果<history-sql>使用了表"dws_tmis_tax_details_full"和字段"sum_amount"，则当前SQL也应使用相同的表和字段。
-        请结合这些上下文信息生成SQL，但要根据当前问题生成新的SQL，不要直接复制历史SQL的具体值。**特别注意**：如果<time-range>存在且当前问题没有明确指定时间，必须使用<time-range>中的时间范围。**特别重要**：如果<history-sql>存在（追问场景），必须使用<history-sql>中的表名和字段名，只修改查询条件（如时间、地区等）。
+          - <filter-disposal>：语义仲裁结果。当存在此块时，表示上一轮的某些过滤条件与当前问题意图冲突（如「各产业分布」与「并表」子集过滤互斥），**必须**按块内说明丢弃对应条件，否则会导致分布统计失真。
+        请结合这些上下文信息生成SQL，但要根据当前问题生成新的SQL，不要直接复制历史SQL的具体值。**特别注意**：如果<time-range>存在且当前问题没有明确指定时间，必须使用<time-range>中的时间范围。**特别重要**：如果<history-sql>存在（追问场景），必须使用<history-sql>中的表名和字段名，只修改查询条件（如时间、地区等）。**必须遵守**：若存在<filter-disposal>块，生成SQL时不得使用其中列出的过滤条件。
       </Instruction>
       
       你必须遵守以下规则:
@@ -330,6 +337,9 @@ template:
         </rule>
         <rule>
           **jq_zbval 表规则**：当 SQL 涉及 dws_cgn_jq_zbval_year 或 dws_cgn_jq_zbval_month 表时：① 必须对 sys_unittitle 排除脏数据（注销、虚拟、处置清除）；② 查某个公司的经营情况指标时，因表中公司名称不统一（部分需加「本部」后缀），使用 sys_unittitle IN ('公司名', '公司名（本部）')；③ 查集团层经营情况指标时，固定使用 sys_unittitle = '中国广核集团有限公司（合并）'。
+        </rule>
+        <rule>
+          **filter-disposal 必须遵守**：若<context>中存在<filter-disposal>块，生成 SQL 时**不得**使用其中列出的过滤条件（如 is_exit_press_reduce、is_consolidated 等），因与当前问题「全量分布」意图冲突。
         </rule>
         <rule>
           **EAV/指标表结构**：若表中有「指标名称」「指标值」类字段，表示采用 EAV 结构。用户问「XX指标」时，需：

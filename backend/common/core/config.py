@@ -125,6 +125,14 @@ class Settings(BaseSettings):
 
     TABLE_EMBEDDING_ENABLED: bool = Field(default=False, description="是否启用表结构的embedding检索筛选")
     TABLE_EMBEDDING_COUNT: int = Field(default=10, description="表embedding检索返回的最大表数量")
+    # 上下文仲裁者（多轮对话意图冲突检测，解决「子集过滤」与「全量分布」冲突）
+    CONTEXT_ARBITRATOR_API_URL: str = Field(
+        default="http://10.100.110.113:8000/v1",
+        description="语义仲裁者 API 地址（OpenAI 兼容格式），留空则禁用仲裁",
+    )
+    CONTEXT_ARBITRATOR_MODEL: str = Field(default="Qwen3.5-9B", description="仲裁者模型名称")
+    CONTEXT_ARBITRATOR_TIMEOUT: float = Field(default=5.0, description="仲裁者调用超时秒数")
+
     GUESS_SCHEMA_TABLE_COUNT: int = Field(default=5, description="猜你想问场景 schema pruning 返回表数量（建议 3-5）")
     GUESS_SCHEMA_INCLUDE_VALUE_HINTS: bool = Field(default=True, description="猜你想问 schema 是否注入深表字段值域示例")
     GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")

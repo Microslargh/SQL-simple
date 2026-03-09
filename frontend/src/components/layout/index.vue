@@ -4,7 +4,7 @@
       class="main-menu"
       :class="{ 'main-menu-sidebar': !topLayout, 'main-menu-topbar': topLayout }"
     >
-      <div class="logo">SQLBot</div>
+      <div class="logo">财务智能问数</div>
 
       <!-- <div v-if="!topLayout || !showSubmenu"
            :class="{ 'workspace-area': !topLayout, 'topbar-workspace-area': topLayout }">

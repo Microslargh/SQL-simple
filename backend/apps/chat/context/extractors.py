@@ -360,3 +360,49 @@ class IntentContinuityAnalyzer:
         except Exception as e:
             _async_log_util.debug(f"[上下文提取] 意图分析失败: {e}")
             return None
+
+
+class FilterSlotExtractor:
+    """从历史 SQL 的 WHERE 子句提取过滤条件（槽位），供语义仲裁者使用"""
+
+    FIELD_TO_SLOT = {
+        "year": "year",
+        "month": "month",
+        "create_date": "create_date",
+        "is_exit_press_reduce": "is_consolidated",
+        "is_consolidated": "is_consolidated",
+        "register_status": "register_status",
+        "name_1": "region",
+        "gjczqyname": "group_company",
+    }
+
+    @classmethod
+    def extract_slots(cls, history_sql: str) -> Dict[str, str]:
+        """从 SQL 提取过滤条件槽位"""
+        if not history_sql or not history_sql.strip():
+            return {}
+        sql = history_sql.strip()
+        slots: Dict[str, str] = {}
+
+        like_match = re.search(
+            r"create_date\s+LIKE\s+['\"](\d{4})[-]?\d{0,2}%['\"]",
+            sql, re.IGNORECASE
+        )
+        if like_match:
+            slots["year"] = like_match.group(1)
+
+        eq_pattern = re.compile(
+            r"(\w+)\s*=\s*(?:['\"]([^'\"]*)['\"]|(\d+))",
+            re.IGNORECASE
+        )
+        for m in eq_pattern.finditer(sql):
+            field, str_val, num_val = m.group(1), m.group(2), m.group(3)
+            val = str_val if str_val is not None else (num_val or "")
+            slot_key = cls.FIELD_TO_SLOT.get(field.lower(), field.lower())
+            slots[slot_key] = val
+
+        if "is_exit_press_reduce" in sql.lower() and "是" in sql:
+            slots["is_consolidated"] = "1"
+
+        _async_log_util.info(f"[上下文提取] 从 SQL 提取槽位: {slots}")
+        return slots

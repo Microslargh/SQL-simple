@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from apps.chat.models.chat_model import ChatLog, ChatRecord
 from apps.chat.context.context_types import ContextNeeds, StructuredContext
+from apps.chat.context.context_cleaner import get_slots_to_discard_hint
 from apps.chat.context.extractors import EntityReferenceExtractor, SQLPatternExtractor, IntentContinuityAnalyzer
 from apps.chat.context.prompt_builder import ContextPromptBuilder
 from apps.chat.context.question_enhancer import QuestionEnhancer, is_any_follow_up
@@ -38,19 +39,34 @@ class ContextStateManager:
         if not history_logs or len(history_logs) == 0:
             return current_question
         
-        # 获取最近的历史问题
+        # 优先从 ChatRecord 取当轮用户问题（log.messages 里第一个 human 可能是 <context> 上下文块，非真实问句）
+        def _get_user_question_for_log(log: ChatLog) -> Optional[str]:
+            if log.pid:
+                record = self.session.get(ChatRecord, log.pid)
+                if record and getattr(record, 'question', None):
+                    return (record.question or '').strip()
+            if not log.messages:
+                return None
+            for msg in log.messages:
+                if msg.get('type') != 'human':
+                    continue
+                content = (msg.get('content') or '').strip()
+                if not content or content.startswith('<context>') or content.startswith('<time-range') or content.startswith('<history'):
+                    continue
+                return content
+            return None
+
         latest_log = history_logs[-1]
-        history_question = None
-        
-        if latest_log.messages:
-            for msg in latest_log.messages:
-                if msg.get('type') == 'human':
-                    history_question = msg.get('content', '')
-                    break
+        history_question = _get_user_question_for_log(latest_log)
+        if history_question and history_question == (current_question or '').strip() and len(history_logs) >= 2:
+            latest_log = history_logs[-2]
+            history_question = _get_user_question_for_log(latest_log)
+            _async_log_util.info(f"[问题增强] 最新日志与当前问题相同，使用上一轮历史: {history_question[:50] if history_question else 'None'}...")
         
         if not history_question:
             return current_question
         
+        _async_log_util.info(f"[问题增强] 参与规则增强的历史问题(前80字): {history_question[:80]}")
         # 使用问题增强器增强问题
         enhanced_question = self.question_enhancer.enhance_question(current_question, history_question)
         
@@ -220,6 +236,23 @@ class ContextStateManager:
                             history_sql = history_sql[:500] + "..."
                     context.history_sql = history_sql
                     _async_log_util.info(f"[上下文管理] 提取到历史SQL（用于追问参考），长度: {len(history_sql)} 字符")
+
+                    # 2.7. 语义仲裁：检测「子集过滤」与「全量分布」冲突，获取应丢弃的槽位
+                    history_question = None
+                    if latest_log.messages:
+                        for msg in latest_log.messages:
+                            if msg.get('type') == 'human':
+                                history_question = msg.get('content', '')
+                                break
+                    if history_question and current_question:
+                        discarded = get_slots_to_discard_hint(
+                            current_question=current_question,
+                            history_question=history_question,
+                            history_sql=record.sql.strip(),
+                        )
+                        if discarded:
+                            context.slots_to_discard = discarded
+                            _async_log_util.info(f"[上下文管理] 语义仲裁：应丢弃槽位 {discarded}")
             except Exception as e:
                 _async_log_util.debug(f"[上下文管理] 提取历史SQL失败: {e}")
         

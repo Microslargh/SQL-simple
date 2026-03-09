@@ -243,6 +243,23 @@ class LLMService:
             _async_log_util.debug(f"[问题增强-LLM] 调用失败，将使用规则补充: {e}")
         return None
 
+    def _get_user_question_from_log(self, log: ChatLog) -> Optional[str]:
+        """从日志得到当轮用户真实问题。优先用 ChatRecord.question；否则从 messages 取 human 且跳过 <context> 等上下文块。"""
+        if log.pid:
+            record = self.session.get(ChatRecord, log.pid)
+            if record and getattr(record, 'question', None):
+                return (record.question or '').strip()
+        if not log.messages:
+            return None
+        for msg in log.messages:
+            if msg.get('type') != 'human':
+                continue
+            content = (msg.get('content') or '').strip()
+            if not content or content.startswith('<context>') or content.startswith('<time-range') or content.startswith('<history'):
+                continue
+            return content
+        return None
+
     def _get_effective_current_time(self) -> str:
         """获取用于 prompt 的 current_time。
         若回答该问题须用到 cqs 表且问题没有明确指定时间时，则从数据源取 create_date 最新值，
@@ -300,34 +317,26 @@ class LLMService:
         """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
         
-        # 多轮对话：先尝试用大模型智能补充问题，再回退到规则补充
+        # 多轮对话：追问场景优先使用规则增强（确定性、正确），LLM 易产生幻觉；仅当规则无法增强时才用 LLM
         if self.original_question is None:  # 只在第一次调用时保存原始问题
             self.original_question = self.chat_question.question
         original_question = self.original_question  # 使用保存的原始问题
         enhanced_question = self.chat_question.question
         if len(self.generate_sql_logs) > 0:
             context_manager = ContextStateManager(self.session, self.current_user)
-            latest_log = self.generate_sql_logs[-1]
-            history_question = None
-            if latest_log.messages:
-                for msg in latest_log.messages:
-                    if msg.get('type') == 'human':
-                        history_question = msg.get('content', '')
-                        break
-            if history_question:
-                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question)
-                if llm_enhanced:
-                    enhanced_question = llm_enhanced
-                else:
-                    enhanced_question = context_manager.enhance_question_with_history(
-                        self.chat_question.question,
-                        self.generate_sql_logs
-                    )
+            rule_enhanced = context_manager.enhance_question_with_history(
+                self.chat_question.question,
+                self.generate_sql_logs
+            )
+            if rule_enhanced != self.chat_question.question:
+                enhanced_question = rule_enhanced
             else:
-                enhanced_question = context_manager.enhance_question_with_history(
-                    self.chat_question.question,
-                    self.generate_sql_logs
-                )
+                latest_log = self.generate_sql_logs[-1]
+                history_question = self._get_user_question_from_log(latest_log)
+                if history_question and history_question == (self.chat_question.question or '').strip() and len(self.generate_sql_logs) >= 2:
+                    history_question = self._get_user_question_from_log(self.generate_sql_logs[-2])
+                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question) if history_question else None
+                enhanced_question = llm_enhanced if llm_enhanced else self.chat_question.question
             
             if enhanced_question != self.chat_question.question:
                 _async_log_util.info(f"[问题增强] 原始问题: {self.chat_question.question}")
@@ -437,31 +446,23 @@ class LLMService:
         """初始化快速模板匹配的消息列表，使用智能上下文管理"""
         self.straight_messages = []
         
-        # 多轮对话：先尝试用大模型智能补充问题，再回退到规则补充（与 init_messages 一致，问题已在 init_messages 中可能被更新）
+        # 多轮对话：与 init_messages 一致，优先规则增强；问题已在 init_messages 中可能被更新
         enhanced_question = self.chat_question.question
         if len(self.generate_sql_logs) > 0:
             context_manager = ContextStateManager(self.session, self.current_user)
-            latest_log = self.generate_sql_logs[-1]
-            history_question = None
-            if latest_log.messages:
-                for msg in latest_log.messages:
-                    if msg.get('type') == 'human':
-                        history_question = msg.get('content', '')
-                        break
-            if history_question:
-                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question)
-                if llm_enhanced:
-                    enhanced_question = llm_enhanced
-                else:
-                    enhanced_question = context_manager.enhance_question_with_history(
-                        self.chat_question.question,
-                        self.generate_sql_logs
-                    )
+            rule_enhanced = context_manager.enhance_question_with_history(
+                self.chat_question.question,
+                self.generate_sql_logs
+            )
+            if rule_enhanced != self.chat_question.question:
+                enhanced_question = rule_enhanced
             else:
-                enhanced_question = context_manager.enhance_question_with_history(
-                    self.chat_question.question,
-                    self.generate_sql_logs
-                )
+                latest_log = self.generate_sql_logs[-1]
+                history_question = self._get_user_question_from_log(latest_log)
+                if history_question and history_question == (self.chat_question.question or '').strip() and len(self.generate_sql_logs) >= 2:
+                    history_question = self._get_user_question_from_log(self.generate_sql_logs[-2])
+                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question) if history_question else None
+                enhanced_question = llm_enhanced if llm_enhanced else self.chat_question.question
             
             if enhanced_question != self.chat_question.question:
                 _async_log_util.info(f"[问题增强-快速模板] 原始问题: {self.chat_question.question}")
@@ -1181,7 +1182,7 @@ class LLMService:
                                       current_user=self.current_user)
 
 
-    def double_check_straight_sql_info(self,matched_id, infos, training_data):
+    def double_check_straight_sql_info(self, matched_id, infos, training_data):
         matched_data = None
         for i in training_data:
             if int(matched_id) == int(i["id"]):
@@ -1189,10 +1190,20 @@ class LLMService:
         if not matched_data:
             return False
         template_id = matched_data["id"]
-        template_question = matched_data["question"]
+        template_question = matched_data["question"] or ""
         sql_template = matched_data["sql-template"]
         sql_info = matched_data["sql-info"]
         user_sql_info = json.dumps(infos)
+        user_question = (self.chat_question.question or "").strip()
+
+        # 范围限定词预检：模板含「海外/境外/境内/国内」而用户未提及，直接判不匹配
+        _SCOPE_KEYWORDS = ("海外", "境外", "境内", "国内")
+        for kw in _SCOPE_KEYWORDS:
+            if kw in template_question and kw not in user_question:
+                _async_log_util.info(
+                    f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板含「{kw}」而用户问题未提及，直接判不匹配"
+                )
+                return False
 
         double_check_messages = [
             SystemMessage(
@@ -1221,27 +1232,42 @@ class LLMService:
             _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
         # 解析二次校验结果：要求模型最后一行只返回 True 或 False
         lines = [line.strip() for line in content_str.split("\n") if line.strip()]
-        # 先看最后一行（模型按要求应在最后一行返回 True/False）
-        last_line = (lines[-1] if lines else "").strip().rstrip(".").rstrip("。").lower()
-        if last_line == "true":
-            _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模型最后一行: {lines[-1] if lines else '(空)'}")
-            return True
-        if last_line == "false":
-            _async_log_util.info(f"[快速模板匹配] 二次校验返回False - 模型完整回复:\n{content_str[:500]}")
-            return False
-        # 最后一行不是 true/false 时，可能是格式问题：在全文找单独一行的 true/false（取最后一次出现）
-        for line in reversed(lines):
+        # 收集所有单独一行的 true/false 及其出现顺序
+        bool_lines = []
+        for i, line in enumerate(lines):
             normalized = line.strip().rstrip(".").rstrip("。").lower()
             if normalized == "true":
-                _async_log_util.info(f"[快速模板匹配] 二次校验通过（从全文解析） - 找到True的行: {line}")
+                bool_lines.append((i, True))
+            elif normalized == "false":
+                bool_lines.append((i, False))
+
+        if not bool_lines:
+            _async_log_util.info(
+                f"[快速模板匹配] 二次校验无法解析True/False（可能模型未按「最后一行只返回True或False」输出） - 模型完整回复:\n{content_str[:800]}"
+            )
+            return False
+
+        # 若模型同时输出 True 和 False（格式混乱），根据推理内容判断：推理含「一致」「匹配」「可以使用」等则取 True
+        if len(bool_lines) > 1:
+            reasoning_text = " ".join(lines[: bool_lines[0][0]]) if bool_lines else ""
+            if any(kw in reasoning_text for kw in ("一致", "匹配", "可以使用", "符合", "满足")):
+                _async_log_util.info(
+                    f"[快速模板匹配] 二次校验通过 - 模型同时输出True/False，推理含匹配表述，取True"
+                )
                 return True
-            if normalized == "false":
-                _async_log_util.info(f"[快速模板匹配] 二次校验解析到False - 模型完整回复:\n{content_str[:500]}")
+            # 推理含否定表述则取 False
+            if any(kw in reasoning_text for kw in ("不一致", "不匹配", "不符合", "不满足", "不能使用")):
+                _async_log_util.info(f"[快速模板匹配] 二次校验返回False - 模型推理含不匹配表述")
                 return False
-        # 无法解析出 True/False 时视为未通过，并打出完整回复便于排查
-        _async_log_util.info(
-            f"[快速模板匹配] 二次校验无法解析True/False（可能模型未按「最后一行只返回True或False」输出） - 模型完整回复:\n{content_str[:800]}"
-        )
+            # 无法从推理判断时，取最后一次出现（保持原逻辑）
+            result = bool_lines[-1][1]
+        else:
+            result = bool_lines[0][1]
+
+        if result:
+            _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模型返回: True")
+            return True
+        _async_log_util.info(f"[快速模板匹配] 二次校验返回False - 模型完整回复:\n{content_str[:500]}")
         return False
 
 
@@ -1950,7 +1976,23 @@ class LLMService:
                         'description': '正在检索相似SQL示例...'
                     }).decode() + '\n\n'
                 
-                training_template, sql_info_templates, training_data = get_training_template_with_data(self.session, self.chat_question.question, ds_id, oid)
+                # 追问场景：训练数据检索前先做问题增强，使用增强后的问题检索（与术语检索、init_messages 一致）
+                training_query = self.chat_question.question
+                if len(self.generate_sql_logs) > 0:
+                    reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
+                    has_reference = any(word in self.chat_question.question for word in reference_words)
+                    is_followup = is_any_follow_up(self.chat_question.question)
+                    if has_reference or is_followup:
+                        context_manager = ContextStateManager(self.session, self.current_user)
+                        enhanced = context_manager.enhance_question_with_history(
+                            self.chat_question.question,
+                            self.generate_sql_logs
+                        )
+                        if enhanced != self.chat_question.question:
+                            training_query = enhanced
+                            _async_log_util.info(f"[训练数据检索-追问增强] 原始: {self.chat_question.question[:50]}, 增强后: {training_query[:80]}")
+                
+                training_template, sql_info_templates, training_data = get_training_template_with_data(self.session, training_query, ds_id, oid)
                 self.chat_question.data_training = training_template
                 
                 # 记录embedding配置状态
@@ -1958,7 +2000,7 @@ class LLMService:
                 _async_log_util.info(f"[Embedding配置检查] TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED}, TABLE_EMBEDDING_COUNT={settings.TABLE_EMBEDDING_COUNT}")
                 
                 # 记录训练数据检索结果
-                _async_log_util.info(f"[快速模板匹配] 检索到 {len(training_data)} 条相似SQL示例 - 用户问题: {self.chat_question.question[:100]}")
+                _async_log_util.info(f"[快速模板匹配] 检索到 {len(training_data)} 条相似SQL示例 - 检索用问题: {training_query[:100]}")
                 if training_data:
                     template_ids = [str(t.get('id', 'unknown')) for t in training_data[:5]]
                     _async_log_util.info(f"[快速模板匹配] 前5个模板ID: {', '.join(template_ids)}")

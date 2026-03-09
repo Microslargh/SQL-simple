@@ -369,6 +369,7 @@ class LLMService:
                 "1) 必须对 sys_unittitle 添加过滤，排除脏数据：AND sys_unittitle NOT LIKE '%注销%' AND sys_unittitle NOT LIKE '%虚拟%' AND sys_unittitle NOT LIKE '%清除%'。\n"
                 "2) 查某个公司的经营情况指标时：因表中公司名称不统一（部分需加「本部」后缀），使用 IN 同时匹配两种形式，例如 sys_unittitle IN ('红沿河公司', '红沿河公司（本部）')。\n"
                 "3) 查集团层经营情况指标时：固定使用 sys_unittitle = '中国广核集团有限公司（合并）'。\n"
+                "4) **年报表 dws_cgn_jq_zbval_year 的 sys_datatime**：该字段为年报统计周期码（如 202204、202404），后两位非月份含义。SELECT 中若将 sys_datatime 作为时间维度展示，必须用 LEFT(sys_datatime, 4) 或 SUBSTR(sys_datatime, 1, 4) 并 AS 为「year」，例如 SELECT LEFT(sys_datatime, 4) AS \"year\", ...，避免分析端将 202404 误读为 2024年4月。WHERE 中按原值筛选即可。\n"
                 "</rule>"
             )
             original_custom_prompt = self.chat_question.custom_prompt or ""
@@ -696,6 +697,13 @@ class LLMService:
             if data_source_hint:
                 custom_prompt_parts.append(data_source_hint)
                 _async_log_util.info(f"[数据分析] 已添加数据来源提示到 custom_prompt: {data_source_hint}")
+        
+        # 年报表时间口径：仅要求按年份表述，不出现任何 sys_datatime、202404 等技术说明
+        if self.record and self.record.sql and 'dws_cgn_jq_zbval_year' in (self.record.sql or ''):
+            custom_prompt_parts.append(
+                "> **年报表时间口径（必须遵守）**：本次数据来源于年报表，时间口径为**年份**。"
+                "分析中涉及时间时直接使用「2024年」「各年度」等表述，勿使用「2024年4月」「截至XX年X月」或任何带月份的表述；勿出现任何字段名、编码或技术说明。"
+            )
         
         # 合并所有 custom_prompt 部分
         self.chat_question.custom_prompt = "\n\n".join(custom_prompt_parts) if custom_prompt_parts else ""
@@ -1765,8 +1773,22 @@ class LLMService:
 
         return chart_type
 
+    def _rewrite_jq_zbval_year_sys_datatime(self, sql: str) -> str:
+        """年报表 dws_cgn_jq_zbval_year 的 sys_datatime 为周期码（后两位非月份）。将 SELECT 中的 sys_datatime AS \"year\" 改为 LEFT(..., 4) AS \"year\"，避免分析端误读为年月。"""
+        if 'dws_cgn_jq_zbval_year' not in sql:
+            return sql
+        if 'LEFT(sys_datatime' in sql or 'LEFT("sys_datatime"' in sql:
+            return sql
+        if '"sys_datatime" AS "year"' in sql:
+            sql = sql.replace('"sys_datatime" AS "year"', 'LEFT("sys_datatime", 4) AS "year"')
+        elif re.search(r'\bsys_datatime\s+AS\s+["\']year["\']', sql, re.IGNORECASE):
+            sql = re.sub(r'\bsys_datatime\s+AS\s+"year"', 'LEFT(sys_datatime, 4) AS "year"', sql, flags=re.IGNORECASE)
+            sql = re.sub(r"\bsys_datatime\s+AS\s+'year'", "LEFT(sys_datatime, 4) AS 'year'", sql, flags=re.IGNORECASE)
+        return sql
+
     def check_save_sql(self, res: str) -> str:
         sql, *_ = self.check_sql(res=res)
+        sql = self._rewrite_jq_zbval_year_sys_datatime(sql)
         save_sql(session=self.session, sql=sql, record_id=self.record.id, current_user=self.current_user)
 
         self.chat_question.sql = sql

@@ -336,7 +336,7 @@ template:
           **cqs 表时间**：当 SQL 涉及 dws_cqs 表（法人户数/企业查询）且用户问题未明确指定时间时，create_date（或同类时间字段）的过滤条件必须与 <current-time> 的年月一致，例如 <current-time> 为 2026-01-31 时使用 create_date LIKE '2026-01%'。
         </rule>
         <rule>
-          **jq_zbval 表规则**：当 SQL 涉及 dws_cgn_jq_zbval_year 或 dws_cgn_jq_zbval_month 表时：① 必须对 sys_unittitle 排除脏数据（注销、虚拟、处置清除）；② 查某个公司的经营情况指标时，因表中公司名称不统一（部分需加「本部」后缀），使用 sys_unittitle IN ('公司名', '公司名（本部）')；③ 查集团层经营情况指标时，固定使用 sys_unittitle = '中国广核集团有限公司（合并）'。
+          **jq_zbval 表规则**：当 SQL 涉及 dws_cgn_jq_zbval_year 或 dws_cgn_jq_zbval_month 表时：① 必须对 sys_unittitle 排除脏数据（注销、虚拟、处置清除）；② 查某个公司的经营情况指标时，因表中公司名称不统一（部分需加「本部」后缀），使用 sys_unittitle IN ('公司名', '公司名（本部）')；③ 查集团层经营情况指标时，固定使用 sys_unittitle = '中国广核集团有限公司（合并）'；④ **年报表 dws_cgn_jq_zbval_year 的 sys_datatime** 为年报周期码（后两位非月份），SELECT 中若展示该时间维度须用 LEFT(sys_datatime, 4) AS \"year\"，避免被误读为年月。
         </rule>
         <rule>
           **filter-disposal 必须遵守**：若<context>中存在<filter-disposal>块，生成 SQL 时**不得**使用其中列出的过滤条件（如 is_exit_press_reduce、is_consolidated 等），因与当前问题「全量分布」意图冲突。

@@ -1131,10 +1131,12 @@ class LLMService:
             raise _error
 
     def generate_sql(self):
-        # 检查表选择规则：如果当前暂无数据，直接返回错误消息
+        # 检查表选择规则：如果当前暂无数据或查询时间超出数据范围，直接返回友好提示（含「当前数据库仅有X年X月及以前的数据」等）
         if self.table_selection_info and self.table_selection_info.get("status") == "no_data":
-            error_msg = '{"success":false,"message":"当前暂无想要查询的数据"}'
-            yield {'content': error_msg}
+            hint_message = self.table_selection_info.get("message") or "当前暂无想要查询的数据"
+            error_msg = orjson.dumps({"success": False, "message": hint_message}).decode()
+            # 前端用 reasoning_content 拼接到 sql_answer 展示；content 保留 JSON 供协议判断
+            yield {'content': error_msg, 'reasoning_content': hint_message}
             self.sql_message.append(AIMessage(error_msg))
             self.current_logs[OperationEnum.GENERATE_SQL] = start_log(session=self.session,
                                                                       ai_modal_id=self.chat_question.ai_modal_id,
@@ -2253,11 +2255,42 @@ class LLMService:
                 sql_res = self.generate_sql()
                 full_sql_text = ''
                 for chunk in sql_res:
-                    full_sql_text += chunk.get('content')
+                    full_sql_text += chunk.get('content') or ''
                     if in_chat:
                         yield 'data:' + orjson.dumps(
                             {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
                              'type': 'sql-result'}).decode() + '\n\n'
+                # 若为 no_data 或 LLM 返回「无法回答」等（success:false 的 JSON），补发 sql-generation 的 step-complete 并结束，避免前端一直转圈
+                parsed = None
+                if full_sql_text:
+                    try:
+                        parsed = orjson.loads(full_sql_text.strip())
+                    except (orjson.JSONDecodeError, TypeError):
+                        json_str = extract_nested_json(full_sql_text)
+                        if json_str:
+                            try:
+                                parsed = orjson.loads(json_str)
+                            except (orjson.JSONDecodeError, TypeError):
+                                pass
+                if isinstance(parsed, dict) and parsed.get('success') is False and parsed.get('message'):
+                    if in_chat:
+                        # 与图二一致：用 analysis-result 把提示输出到步骤下方主文区域（前端已有逻辑，无需改前端）
+                        yield 'data:' + orjson.dumps({
+                            'content': parsed.get('message'),
+                            'reasoning_content': '',
+                            'type': 'analysis-result'
+                        }).decode() + '\n\n'
+                        yield 'data:' + orjson.dumps({
+                            'type': 'step-complete',
+                            'step': 'sql-generation',
+                            'step_name': 'SQL生成',
+                            'description': '未生成SQL（已提示用户）',
+                            'result': {'message': parsed.get('message')}
+                        }).decode() + '\n\n'
+                        yield 'data:' + orjson.dumps({'type': 'finish'}).decode() + '\n\n'
+                    if not stream:
+                        yield json_result
+                    return
                 # filter sql
                 # 优化：只在DEBUG模式下记录完整SQL文本
                 chart_type = self.get_chart_type_from_sql_answer(full_sql_text)
@@ -2348,9 +2381,25 @@ class LLMService:
                 return
 
             # 执行SQL（在finish_step检查之后）
-            result = self.execute_sql(sql=real_execute_sql)
+            try:
+                result = self.execute_sql(sql=real_execute_sql)
+            except Exception as e:
+                err_msg = str(e) if str(e) else traceback.format_exc(limit=2)
+                if in_chat:
+                    yield 'data:' + orjson.dumps({
+                        'type': 'step-error',
+                        'step': 'sql-execution',
+                        'step_name': 'SQL执行',
+                        'error': f'SQL执行失败：{err_msg}'
+                    }).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({'content': err_msg, 'type': 'error'}).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({'type': 'finish'}).decode() + '\n\n'
+                if not stream:
+                    json_result['success'] = False
+                    json_result['message'] = err_msg
+                    yield json_result
+                return
             self.save_sql_data(data_obj=result)
-            
             # SQL执行完成
             data_count = len(result.get('data', [])) if result.get('data') else 0
             field_count = len(result.get('fields', [])) if result.get('fields') else 0

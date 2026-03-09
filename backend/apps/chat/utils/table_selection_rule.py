@@ -17,7 +17,8 @@ TARGET_INDICATORS = [
     "亏损",
     "负债",
     "利润",
-    "收入"
+    "收入",
+    "担保",
 ]
 
 
@@ -80,7 +81,8 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
     
     Returns:
         包含以下字段的字典（如果适用），否则返回 None:
-        - status: "no_data" | "rule" - "no_data" 表示当前暂无数据，"rule" 表示需要生成规则
+        - status: "no_data" | "rule" - "no_data" 表示当前暂无数据或查询时间超出数据范围，"rule" 表示需要生成规则
+        - message: 可选，当 status="no_data" 时的用户可见提示（如「当前数据库仅有2026年2月及以前的数据」）
         - rule_text: 规则文本（当 status="rule" 时）
         - table_type: "year" | "month" - 使用的表类型（当 status="rule" 时）
         - table_name: 表名（当 status="rule" 时）
@@ -90,15 +92,9 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
     if not _contains_target_indicator(question):
         return None
     
-    # 提取问题中的年份和月份
-    year, month = _extract_year_month(question)
-    if year is None:
-        return None
-    
-    # 解析当前时间
+    # 解析当前时间（先解析，便于将「今年」「去年」「明年」转为具体年份）
     if current_time:
         try:
-            # 尝试解析多种时间格式
             for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d"]:
                 try:
                     current_dt = datetime.strptime(current_time.strip(), fmt)
@@ -111,12 +107,37 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
             current_dt = datetime.now()
     else:
         current_dt = datetime.now()
-    
     current_year = current_dt.year
     current_month = current_dt.month
-    
-    # 规则1: 如果问题明确包含"年+月"（例如 "2025年1月"），使用月报表
+
+    # 将「今年」「去年」「明年」等替换为具体年份后再提取时间，以支持「今年8月」等问法
+    q_normalized = (
+        question.replace("今年", f"{current_year}年")
+        .replace("明年", f"{current_year + 1}年")
+        .replace("去年", f"{current_year - 1}年")
+    )
+    year, month = _extract_year_month(q_normalized)
+    if year is None:
+        return None
+    # 数据库通常滞后约 1 个月：当前 2026 年 3 月时，仅有 2026 年 2 月及以前数据
+    if current_month <= 1:
+        latest_year, latest_month = current_year - 1, 12
+    else:
+        latest_year, latest_month = current_year, current_month - 1
+
+    # 规则1: 如果问题明确包含"年+月"（例如 "2025年1月"、"今年8月"），先判断是否超出数据范围
     if month is not None:
+        if (year, month) > (latest_year, latest_month):
+            return {
+                "status": "no_data",
+                "message": f"当前数据库仅有{latest_year}年{latest_month}月及以前的数据，无法提供{year}年{month}月的数据。请缩小时间范围后重试。",
+                "rule_text": None,
+                "table_type": None,
+                "table_name": None,
+                "data_source_hint": None,
+                "year": year,
+                "month": month,
+            }
         rule_text = (
             f"<rule>\n"
             f"用户查询的是 {year}年{month}月的指标数据，必须使用月报表 dws_cgn_jq_zbval_month 进行查询。"
@@ -136,11 +157,12 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
     if year >= current_year:
         return {
             "status": "no_data",
+            "message": f"当前数据库仅有{latest_year}年{latest_month}月及以前的数据，无法提供{year}年的数据。请缩小时间范围后重试。",
             "rule_text": None,
             "table_type": None,
             "table_name": None,
             "data_source_hint": None,
-            "year": year  # 保存查询的年份，用于错误消息
+            "year": year,
         }
     
     # 情况2.2: 查询的是上一年

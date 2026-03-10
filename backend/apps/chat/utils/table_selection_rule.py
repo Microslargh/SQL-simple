@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import Optional, Dict, Literal
 
 
+# 年报/月报分界：当年在此日期之前用去年12月月报，在此日期及之后用去年年报表
+YEAR_REPORT_CUTOFF_MONTH = 4
+YEAR_REPORT_CUTOFF_DAY = 25
+
 # 需要应用此规则的指标关键词
 TARGET_INDICATORS = [
     "经营情况",
@@ -167,11 +171,12 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
     
     # 情况2.2: 查询的是上一年
     if year == current_year - 1:
-        # 如果当前时间未超过3月，使用月报表的12月数据
-        if current_month < 3:
+        # 分界为当年4月25日：未到4月25日使用月报表12月数据，4月25日及之后使用年报表Q4数据
+        cutoff_date = datetime(current_year, YEAR_REPORT_CUTOFF_MONTH, YEAR_REPORT_CUTOFF_DAY)
+        if current_dt < cutoff_date:
             rule_text = (
                 f"<rule>\n"
-                f"用户查询的是 {year}年（上一年）的指标数据，当前时间为 {current_year}年{current_month}月（未超过3月），"
+                f"用户查询的是 {year}年（上一年）的指标数据，当前时间为 {current_year}年{current_month}月（未超过{YEAR_REPORT_CUTOFF_MONTH}月{YEAR_REPORT_CUTOFF_DAY}日），"
                 f"必须使用月报表 dws_cgn_jq_zbval_month 进行查询，查询条件应匹配年份和月份（年份字段 = {year} AND 月份字段 = 12）。\n"
                 f"</rule>"
             )
@@ -183,11 +188,11 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
                 "data_source_hint": f"> [!TIP]\n> **数据来源提示**：当前数据来源于月报快报表（`dws_cgn_jq_zbval_month`）中 {year}年12月的数据。"
             }
         else:
-            # 当前时间超过3月，使用年报表的Q4数据（202504表示2025年Q4）
+            # 当前时间已达4月25日及之后，使用年报表的Q4数据（202504表示2025年Q4）
             q4_period = f"{year}04"  # 例如 202504 表示 2025年Q4
             rule_text = (
                 f"<rule>\n"
-                f"用户查询的是 {year}年（上一年）的指标数据，当前时间为 {current_year}年{current_month}月（已超过3月），"
+                f"用户查询的是 {year}年（上一年）的指标数据，当前时间为 {current_year}年{current_month}月（已超过{YEAR_REPORT_CUTOFF_MONTH}月{YEAR_REPORT_CUTOFF_DAY}日），"
                 f"必须使用年报表 dws_cgn_jq_zbval_year 进行查询，查询条件应匹配年份和季度（例如：年份季度字段 = '{q4_period}' 或类似格式，表示 {year}年第四季度）。\n"
                 f"</rule>"
             )

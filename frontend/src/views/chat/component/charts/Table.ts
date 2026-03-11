@@ -1,6 +1,30 @@
 import { BaseChart, type ChartAxis, type ChartData } from '@/views/chat/component/BaseChart.ts'
-import { TableSheet, type S2Options, type S2DataConfig, type S2MountContainer } from '@antv/s2'
+import { TableSheet, TableDataCell, type S2Options, type S2DataConfig, type S2MountContainer } from '@antv/s2'
 import { debounce } from 'lodash-es'
+
+/** 自定义数据单元格：序号列居中，其余列文字居左、数字居右 */
+function isNumericValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return false
+  if (typeof value === 'number' && !Number.isNaN(value)) return true
+  const s = String(value).trim()
+  if (/^-?\d+(\.\d+)?$/.test(s)) return true
+  return false
+}
+
+class AlignTableDataCell extends TableDataCell {
+  getTextStyle() {
+    const textStyle = super.getTextStyle()
+    const valueField = this.meta?.valueField
+    if (valueField === '__index__') {
+      return { ...textStyle, textAlign: 'center' as const }
+    }
+    const value = this.meta?.fieldValue
+    return {
+      ...textStyle,
+      textAlign: isNumericValue(value) ? ('right' as const) : ('left' as const),
+    }
+  }
+}
 
 export class Table extends BaseChart {
   table?: TableSheet = undefined
@@ -227,6 +251,8 @@ export class Table extends BaseChart {
           description: 'No Data',
         },
       },
+      dataCell: (viewMeta: any, spreadsheet: any) =>
+        new AlignTableDataCell(viewMeta, spreadsheet),
     }
 
     if (this.container) {

@@ -11,6 +11,8 @@ from apps.chat.context.context_cleaner import get_slots_to_discard_hint
 from apps.chat.context.extractors import EntityReferenceExtractor, SQLPatternExtractor, IntentContinuityAnalyzer
 from apps.chat.context.prompt_builder import ContextPromptBuilder
 from apps.chat.context.question_enhancer import QuestionEnhancer, is_any_follow_up
+from apps.chat.context.question_enhance_llm import rewrite_question_with_llm
+from common.core.config import settings
 from common.utils.utils import _async_log_util
 
 
@@ -65,11 +67,38 @@ class ContextStateManager:
         
         if not history_question:
             return current_question
-        
+
+        # 构建多轮历史（供 LLM 使用）
+        max_turns = getattr(settings, "QUESTION_ENHANCE_MAX_TURNS", 5)
+        history_turns: List[dict] = []
+        for log in history_logs[-max_turns:]:
+            user_text = _get_user_question_for_log(log)
+            if not user_text:
+                continue
+            assistant_text: Optional[str] = None
+            if log.pid:
+                record = self.session.get(ChatRecord, log.pid)
+                if record and getattr(record, "analysis", None):
+                    assistant_text = (record.analysis or "").strip()[:500]
+            history_turns.append({"user": user_text, "assistant": assistant_text})
+
+        # 已含明确实体（省/市+指标/明细）时不再调 LLM，避免“过度增强”注入用户未提及的过滤条件（如存续、集团、压减）
+        q = (current_question or "").strip()
+        if len(q) >= 8 and ("省" in q or "市" in q or "区" in q) and ("法人" in q or "户数" in q or "明细" in q or "详情" in q):
+            _async_log_util.info(f"[问题增强] 当前问句已含明确地区与指标，跳过 LLM 与规则，直接返回: {q[:60]}")
+            return current_question
+
+        # 【治本】LLM 优先：若已配置且有多轮历史，先调 LLM；LLM 一旦返回有效结果则立即 return，严禁再执行任何规则，杜绝“LLM 结果被规则二次拼接”
+        api_url = (getattr(settings, "QUESTION_ENHANCE_API_URL", "") or "").strip().rstrip("/")
+        if api_url and history_turns:
+            llm_rewritten = rewrite_question_with_llm(history_turns, current_question or "")
+            if llm_rewritten and llm_rewritten.strip():
+                _async_log_util.info(f"[问题增强-LLM] 采用 LLM 补全，直接返回（不再执行规则）: {llm_rewritten[:80]}")
+                return llm_rewritten.strip()
+
+        # 仅当未配置 LLM 或 LLM 未返回时，才走规则增强
         _async_log_util.info(f"[问题增强] 参与规则增强的历史问题(前80字): {history_question[:80]}")
-        # 使用问题增强器增强问题
         enhanced_question = self.question_enhancer.enhance_question(current_question, history_question)
-        
         return enhanced_question
     
     def analyze_context_needs(self, current_question: str, history_logs: List[ChatLog]) -> ContextNeeds:

@@ -76,13 +76,35 @@ def is_company_follow_up(question: str) -> bool:
     return False
 
 
+def is_detail_follow_up(question: str) -> bool:
+    """判断是否为「明细/详情追问」：要求在上一次查询基础上给出明细。如「请给出明细」「给出详情」「要明细」。
+    注：是否对已增强句不再二次拼接，由编排层保证（LLM 返回后直接 return，不执行规则）。"""
+    if not question or len(question.strip()) > 20:
+        return False
+    q = question.strip()
+    detail_patterns = [
+        r'^请?给出?(明细|详情)$',
+        r'^(要|看|显示|查看)(一下)?(明细|详情)$',
+        r'^(明细|详情)$',
+        r'^请?给出?(.*)(明细|详情)$',  # 请给出XXX明细（XXX 为空或极短时才视为追问）
+    ]
+    for pat in detail_patterns:
+        if re.match(pat, q):
+            return True
+    # 短句且仅包含「明细/详情」相关词
+    if len(q) <= 8 and ('明细' in q or '详情' in q):
+        return True
+    return False
+
+
 def is_any_follow_up(question: str) -> bool:
-    """判断是否为任意类型的追问（时间/地区/指标/公司主体），需结合历史问题做术语与上下文增强。"""
+    """判断是否为任意类型的追问（时间/地区/指标/公司主体/明细），需结合历史问题做术语与上下文增强。"""
     return (
         is_time_follow_up(question)
         or is_region_follow_up(question)
         or is_metric_follow_up(question)
         or is_company_follow_up(question)
+        or is_detail_follow_up(question)
     )
 
 
@@ -292,6 +314,44 @@ class QuestionEnhancer:
                 break
         return None
 
+    def enhance_question_for_detail_follow_up(self, current_question: str, history_question: str) -> Optional[str]:
+        """针对「明细/详情追问」：将当前问补全为「请给出 + 历史问题主题 + 明细/详情」。如「请给出明细」+ 历史「广东省法人户数」->「请给出广东省法人户数明细」。
+        防护：历史为纯指令（如「请给出明细」）或当前问中间已有内容时不再拼接，避免产出「请给出请给出明细…」（LLM 未配置时规则单路仍安全）。"""
+        if not current_question or not history_question:
+            return None
+        q = current_question.strip()
+        history = history_question.strip()
+
+        # 历史为纯指令（无实质主题）时不能当「历史主题」拼接，否则会产出「请给出请给出明细…」
+        history_is_instruction_only = (
+            re.match(r"^请?给出?(明细|详情)$", history)
+            or history in ("明细", "详情")
+            or (len(history) <= 8 and ("明细" in history or "详情" in history))
+        )
+        if history_is_instruction_only:
+            return None
+
+        suffix = "明细" if "明细" in q else "详情"
+        if re.match(r"^请?给出?(明细|详情)$", q) or (len(q) <= 6 and ("明细" in q or "详情" in q)):
+            enhanced = f"请给出{history}{suffix}"
+        elif re.match(r"^(要|看|显示|查看)(一下)?(明细|详情)$", q):
+            enhanced = f"请给出{history}{suffix}"
+        elif re.match(r"^(明细|详情)$", q):
+            enhanced = f"请给出{history}{suffix}"
+        else:
+            m = re.match(r"^(请?给出?)(.*?)(明细|详情)$", q)
+            if m:
+                prefix, middle, suf = m.group(1), m.group(2), m.group(3)
+                if middle.strip():
+                    return None
+                enhanced = f"{prefix}{history}{suf}"
+            else:
+                enhanced = f"请给出{history}{suffix}"
+        if enhanced and enhanced != q:
+            _async_log_util.info(f"[问题增强-明细追问] 原始: {current_question}, 补充后: {enhanced}")
+            return enhanced
+        return None
+
     def enhance_question(self, current_question: str, history_question: str) -> str:
         """增强当前问题，补充历史问题中的关键信息
         
@@ -323,6 +383,11 @@ class QuestionEnhancer:
         # 再处理「指标追问」
         if is_metric_follow_up(current_question):
             expanded = self.enhance_question_for_metric_follow_up(current_question, history_question)
+            if expanded:
+                return expanded
+        # 再处理「明细/详情追问」：如「请给出明细」->「请给出广东省法人户数明细」
+        if is_detail_follow_up(current_question):
+            expanded = self.enhance_question_for_detail_follow_up(current_question, history_question)
             if expanded:
                 return expanded
 

@@ -518,7 +518,7 @@ defineExpose({
     </div>
 
     <template v-if="message?.record?.chart">
-      <div class="chart-block">
+      <div class="chart-block" :class="{ 'chart-block--table': chartType === 'table' }">
         <DisplayChartBlock
           :id="chartId"
           ref="chartRef"
@@ -808,8 +808,12 @@ defineExpose({
   .chart-block {
     height: 352px;
     width: 100%;
-
     margin-top: 16px;
+
+    &.chart-block--table {
+      max-height: 352px;
+      height: fit-content;
+    }
   }
   .over-limit-hint {
     min-height: 24px;

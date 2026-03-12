@@ -48,7 +48,7 @@ except ImportError:
     # 如果模块不存在，定义占位函数和枚举
     find_custom_prompts = None
     CustomPromptTypeEnum = None
-from apps.data_training.curd.data_training import get_training_template, get_training_template_with_data
+from apps.data_training.curd.data_training import get_training_template, get_training_template_with_data, to_xml_string
 from apps.datasource.crud.datasource import get_table_schema, get_table_schema_for_tables, get_table_schema_for_guess
 from apps.datasource.crud.permission import get_row_permission_filters, is_normal_user
 from apps.datasource.embedding.ds_embedding import get_ds_embedding
@@ -57,7 +57,11 @@ from apps.db.db import exec_sql, get_version, check_connection
 from apps.system.crud.assistant import AssistantOutDs, AssistantOutDsFactory, get_assistant_ds
 from apps.system.schemas.system_schema import AssistantOutDsSchema
 from apps.terminology.curd.terminology import get_terminology_template, get_terminology_template_with_data
+from apps.template.generate_chart.generator import get_base_data_training_template
 from apps.template.question_enhance.generator import get_question_enhance_template
+from apps.chat.utils.entity_type_filter import filter_training_data_by_entity_type, infer_entity_type, ENTITY_REGION, ENTITY_COMPANY_INDUSTRY
+from apps.chat.utils.implicit_param_extract import extract_implicit_replacements, apply_implicit_replacements
+from apps.chat.utils.business_rules import apply_business_rules
 from common.core.config import settings
 from common.core.db import engine
 from common.core.deps import CurrentAssistant, CurrentUser
@@ -317,31 +321,35 @@ class LLMService:
         """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
         
-        # 多轮对话：追问场景优先使用规则增强（确定性、正确），LLM 易产生幻觉；仅当规则无法增强时才用 LLM
+        # 多轮对话：追问场景做问题增强；单请求内只增强一次，已增强则直接复用
         if self.original_question is None:  # 只在第一次调用时保存原始问题
             self.original_question = self.chat_question.question
         original_question = self.original_question  # 使用保存的原始问题
         enhanced_question = self.chat_question.question
         if len(self.generate_sql_logs) > 0:
-            context_manager = ContextStateManager(self.session, self.current_user)
-            rule_enhanced = context_manager.enhance_question_with_history(
-                self.chat_question.question,
-                self.generate_sql_logs
-            )
-            if rule_enhanced != self.chat_question.question:
-                enhanced_question = rule_enhanced
+            if getattr(self, "_question_enhanced", False):
+                enhanced_question = self.chat_question.question
             else:
-                latest_log = self.generate_sql_logs[-1]
-                history_question = self._get_user_question_from_log(latest_log)
-                if history_question and history_question == (self.chat_question.question or '').strip() and len(self.generate_sql_logs) >= 2:
-                    history_question = self._get_user_question_from_log(self.generate_sql_logs[-2])
-                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question) if history_question else None
-                enhanced_question = llm_enhanced if llm_enhanced else self.chat_question.question
-            
-            if enhanced_question != self.chat_question.question:
-                _async_log_util.info(f"[问题增强] 原始问题: {self.chat_question.question}")
-                _async_log_util.info(f"[问题增强] 增强后问题: {enhanced_question}")
-                self.chat_question.question = enhanced_question
+                context_manager = ContextStateManager(self.session, self.current_user)
+                rule_enhanced = context_manager.enhance_question_with_history(
+                    self.chat_question.question,
+                    self.generate_sql_logs
+                )
+                if rule_enhanced != self.chat_question.question:
+                    enhanced_question = rule_enhanced
+                else:
+                    latest_log = self.generate_sql_logs[-1]
+                    history_question = self._get_user_question_from_log(latest_log)
+                    if history_question and history_question == (self.chat_question.question or '').strip() and len(self.generate_sql_logs) >= 2:
+                        history_question = self._get_user_question_from_log(self.generate_sql_logs[-2])
+                    llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question) if history_question else None
+                    enhanced_question = llm_enhanced if llm_enhanced else self.chat_question.question
+
+                if enhanced_question != self.chat_question.question:
+                    _async_log_util.info(f"[问题增强] 原始问题: {self.chat_question.question}")
+                    _async_log_util.info(f"[问题增强] 增强后问题: {enhanced_question}")
+                    self.chat_question.question = enhanced_question
+                    self._question_enhanced = True
         
         # 生成年报表/月报表选择规则（如果适用）
         table_selection_info = generate_table_selection_rule(
@@ -446,29 +454,32 @@ class LLMService:
     def init_straight_messages(self):
         """初始化快速模板匹配的消息列表，使用智能上下文管理"""
         self.straight_messages = []
-        
-        # 多轮对话：与 init_messages 一致，优先规则增强；问题已在 init_messages 中可能被更新
+        # 单请求内只增强一次，已增强则直接复用（避免重复调 LLM 与过度增强）
         enhanced_question = self.chat_question.question
         if len(self.generate_sql_logs) > 0:
-            context_manager = ContextStateManager(self.session, self.current_user)
-            rule_enhanced = context_manager.enhance_question_with_history(
-                self.chat_question.question,
-                self.generate_sql_logs
-            )
-            if rule_enhanced != self.chat_question.question:
-                enhanced_question = rule_enhanced
+            if getattr(self, "_question_enhanced", False):
+                enhanced_question = self.chat_question.question
             else:
-                latest_log = self.generate_sql_logs[-1]
-                history_question = self._get_user_question_from_log(latest_log)
-                if history_question and history_question == (self.chat_question.question or '').strip() and len(self.generate_sql_logs) >= 2:
-                    history_question = self._get_user_question_from_log(self.generate_sql_logs[-2])
-                llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question) if history_question else None
-                enhanced_question = llm_enhanced if llm_enhanced else self.chat_question.question
-            
-            if enhanced_question != self.chat_question.question:
-                _async_log_util.info(f"[问题增强-快速模板] 原始问题: {self.chat_question.question}")
-                _async_log_util.info(f"[问题增强-快速模板] 增强后问题: {enhanced_question}")
-                self.chat_question.question = enhanced_question
+                context_manager = ContextStateManager(self.session, self.current_user)
+                rule_enhanced = context_manager.enhance_question_with_history(
+                    self.chat_question.question,
+                    self.generate_sql_logs
+                )
+                if rule_enhanced != self.chat_question.question:
+                    enhanced_question = rule_enhanced
+                else:
+                    latest_log = self.generate_sql_logs[-1]
+                    history_question = self._get_user_question_from_log(latest_log)
+                    if history_question and history_question == (self.chat_question.question or '').strip() and len(self.generate_sql_logs) >= 2:
+                        history_question = self._get_user_question_from_log(self.generate_sql_logs[-2])
+                    llm_enhanced = self._enhance_question_by_llm(self.chat_question.question, history_question) if history_question else None
+                    enhanced_question = llm_enhanced if llm_enhanced else self.chat_question.question
+
+                if enhanced_question != self.chat_question.question:
+                    _async_log_util.info(f"[问题增强-快速模板] 原始问题: {self.chat_question.question}")
+                    _async_log_util.info(f"[问题增强-快速模板] 增强后问题: {enhanced_question}")
+                    self.chat_question.question = enhanced_question
+                    self._question_enhanced = True
         
         # add straight prompt
         self.straight_messages.append(SystemMessage(content=self.chat_question.sql_straight_question()))
@@ -566,7 +577,24 @@ class LLMService:
                 full_analysis_text += chunk.get('content')
             if chunk.get('reasoning_content'):
                 full_thinking_text += chunk.get('reasoning_content')
-            yield chunk
+            # 不直接向前端输出初稿 chunk；最终仅输出修正后的版本
+
+        # 反思与修正：基于真实数据对初稿做 Fact-check & Sanitization，避免幻觉/提示词泄露
+        try:
+            full_analysis_text = self._reflect_and_correct_analysis(
+                draft=full_analysis_text,
+                question=self.chat_question.question or "",
+                sql=self.chat_question.sql or "",
+                fields=self.chat_question.fields or "",
+                data=self.chat_question.data or "[]",
+                data_total_rows=self.chat_question.data_total_rows or "0",
+                data_summary=self.chat_question.data_summary or "",
+            )
+        except Exception as e:
+            _async_log_util.warning(f"[分析反思] 反思节点异常，已跳过: {e}")
+
+        # 仅输出修正后的最终稿（不输出思考过程，避免提示词泄露/机械推理）
+        yield {"content": full_analysis_text, "reasoning_content": ""}
 
         analysis_msg.append(AIMessage(full_analysis_text))
 
@@ -730,7 +758,24 @@ class LLMService:
                 full_analysis_text += chunk.get('content')
             if chunk.get('reasoning_content'):
                 full_thinking_text += chunk.get('reasoning_content')
-            yield chunk
+            # 不直接向前端输出初稿 chunk；最终仅输出修正后的版本
+
+        # 反思与修正：基于真实数据对初稿做 Fact-check & Sanitization，避免幻觉/提示词泄露
+        try:
+            full_analysis_text = self._reflect_and_correct_analysis(
+                draft=full_analysis_text,
+                question=self.chat_question.question or "",
+                sql=self.chat_question.sql or "",
+                fields=self.chat_question.fields or "",
+                data=self.chat_question.data or "[]",
+                data_total_rows=self.chat_question.data_total_rows or "0",
+                data_summary=self.chat_question.data_summary or "",
+            )
+        except Exception as e:
+            _async_log_util.warning(f"[分析反思] 反思节点异常，已跳过: {e}")
+
+        # 仅输出修正后的最终稿（不输出思考过程）
+        yield {"content": full_analysis_text, "reasoning_content": ""}
 
         analysis_msg.append(AIMessage(full_analysis_text))
 
@@ -830,6 +875,113 @@ class LLMService:
         except Exception:
             pass
         return text
+
+    def _reflect_and_correct_analysis(
+        self,
+        draft: str,
+        question: str,
+        sql: str,
+        fields: str,
+        data: str,
+        data_total_rows: str,
+        data_summary: str,
+    ) -> str:
+        """对分析初稿做事实核查、清洗与一致性修正（避免数据幻觉与提示词泄露）。"""
+        if not getattr(settings, "ANALYSIS_REFLECTION_ENABLED", True):
+            return draft
+        if not draft or not draft.strip():
+            return draft
+
+        system_prompt = (
+            "你是一个“反思与修正代理（Reflection & Correction Agent）”。"
+            "你不会重新生成SQL，你只对【分析初稿】做审查与修正，输出给用户的最终报告。\n"
+            "【必须遵守】\n"
+            "1) 事实核查：初稿中的每个数字/占比/总计/排名结论，都必须能从<data-summary>/<data>中找到依据或严格计算得出；"
+            "   若缺少分母（如集团总额/全量分布），严禁输出任何百分比/占比/集中度结论。\n"
+            "2) 逻辑一致：若数据只有1行，不要强行做“排名/分布/集中度”结论；若仅TopN/前N列表且无全量分布/总额，不要推断“高度集中”，也不要用“九成/大部分/几乎全部”等变体暗示比例。\n"
+            "3) 内容清洗：删除一切内部推理与规则说明文本，例如「若用户问…」「根据规则…」「系统判断…」「提示：…」。\n"
+            "4) 只输出最终报告正文（简体中文），不要输出检查清单、不要解释修正过程。\n"
+            "5) **补全表格中的占比**：若<data>或<fields>中已包含占比/比例列（如“占净…”“…比例”或数值带%），而初稿只写了绝对值未写占比，修正稿必须将表中对应比例写入正文，格式为「XXX亿元（占…YY%）」，不得遗漏。例如表格有单一主体占净50.84%、合并范围占净21.33%时，正文须出现「约691.28亿元（占单体净资产50.84%）」「约793.62亿元（占合并净资产21.33%）」等表述。\n"
+        )
+
+        user_prompt = (
+            f"<user-question>\n{question}\n</user-question>\n"
+            f"<sql>\n{sql}\n</sql>\n"
+            f"<fields>\n{fields}\n</fields>\n"
+            f"<data-total-rows>{data_total_rows}</data-total-rows>\n"
+            f"<data-summary>\n{data_summary}\n</data-summary>\n"
+            f"<data>\n{data}\n</data>\n"
+            f"<draft>\n{draft}\n</draft>\n"
+            "请输出修正后的最终分析报告正文："
+        )
+
+        try:
+            resp = self.llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
+            text = ""
+            if hasattr(resp, "content"):
+                text = resp.content if isinstance(resp.content, str) else str(resp.content)
+            text = (text or "").strip()
+            if text:
+                # 兜底：仅在“数据未提供占比/分母”时，改写占比句子为“无法计算占比”，避免误杀正常占比问题
+                cleaned = self._sanitize_percent_claims(
+                    text,
+                    question=question,
+                    sql=sql,
+                    fields=fields,
+                    data=data,
+                    data_summary=data_summary,
+                )
+                if cleaned != text:
+                    _async_log_util.info("[分析反思] 已处理占比/集中度表述（无分母/无ratio则改写）")
+                _async_log_util.info("[分析反思] 已生成修正稿")
+                return cleaned
+        except Exception as e:
+            _async_log_util.warning(f"[分析反思] 调用失败，已跳过: {e}")
+        return draft
+
+    @staticmethod
+    def _sanitize_percent_claims(
+        text: str,
+        question: str = "",
+        sql: str = "",
+        fields: str = "",
+        data: str = "",
+        data_summary: str = "",
+    ) -> str:
+        """当数据未提供“占比/分母/ratio”时，仅删除无依据的占比句；若表中已有占比列或数值含%，则保留所有占比表述。"""
+        if not text:
+            return text
+
+        # 1) 放宽判定：字段名含“占/比例/占比/ratio/percent”或数据中已出现数字+% 即视为有占比数据，不删
+        hay = f"{fields}\n{data_summary}\n{data}"
+        has_ratio_col = bool(
+            re.search(r"(ratio|percent|percentage|share|占比|比例|贡献率|集中度|占净|占\s*[^\s，。；]*比)", hay, flags=re.IGNORECASE)
+        ) or bool(re.search(r"\d+(?:\.\d+)?\s*%", data or ""))
+
+        # 2) 若问题本身明确在问占比/比例，且数据也提供了 ratio 字段，则不处理（避免误杀）
+        q = (question or "").strip()
+        user_asks_ratio = bool(re.search(r"(占比|比例|百分比|贡献度|集中度)", q))
+        if user_asks_ratio and has_ratio_col:
+            return text
+
+        # 3) 若数据没有 ratio/分母字段，但文本里出现百分号或“九成/几乎全部”等比例暗示，则逐句改写
+        if has_ratio_col:
+            # 有 ratio 列但用户没问，占比表述一般也可保留（由反思模型自行控制）
+            return text
+
+        # 仅删除无数据支撑的占比/比例句，不插入免责声明，避免与上文“与全年总额一致”等表述矛盾
+        def _drop_sentence(m: re.Match) -> str:
+            sent = m.group(0)
+            if not sent.strip():
+                return sent
+            if re.search(r"(\d+(?:\.\d+)?\s*%|占[^。；;\n]*\d+|九成|八成|七成|六成|五成|大部分|几乎全部|接近全部)", sent):
+                return ""  # 直接删除该句，不追加“无法计算占比”等废话
+            return sent
+
+        cleaned = re.sub(r"[^。；;\n]*[。；;\n]", _drop_sentence, text)
+        cleaned = re.sub(r"[^。；;\n]*$", _drop_sentence, cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned or text
 
     def _validate_recommend_question_sql(self, question: str) -> bool:
         """
@@ -1206,6 +1358,15 @@ class LLMService:
         user_sql_info = json.dumps(infos)
         user_question = (self.chat_question.question or "").strip()
 
+        # 实体类型预检：地区 vs 公司/产业互斥，避免海南省误用集团各产业模板
+        user_type = infer_entity_type(user_question)
+        template_type = infer_entity_type(template_question)
+        if user_type != template_type and user_type in (ENTITY_REGION, ENTITY_COMPANY_INDUSTRY) and template_type in (ENTITY_REGION, ENTITY_COMPANY_INDUSTRY):
+            _async_log_util.info(
+                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 实体类型冲突: 用户={user_type}, 模板={template_type}"
+            )
+            return False
+
         # 范围限定词预检：模板含「海外/境外/境内/国内」而用户未提及，直接判不匹配
         _SCOPE_KEYWORDS = ("海外", "境外", "境内", "国内")
         for kw in _SCOPE_KEYWORDS:
@@ -1300,7 +1461,7 @@ class LLMService:
 
 
     @staticmethod
-    def generate_straight_sql(training_data, straight_dict_text):
+    def generate_straight_sql(training_data, straight_dict_text, user_question: str = ""):
         import re
         import json  # 在函数开头导入 json，避免作用域问题
         if settings.LOG_LEVEL == "DEBUG":
@@ -1354,12 +1515,19 @@ class LLMService:
         constructed_sql = matched_data.get("sql-template")
         default_kv = matched_data.get("sql-info")
         tables_str = matched_data.get("tables")
-        
-        # 记录匹配到的模板信息
+
         template_id = matched_data.get("id", "unknown")
-        template_question = matched_data.get("question", "")[:100]
+        template_question = (matched_data.get("question") or "")[:200]
         _async_log_util.info(f"[快速模板] 使用模板ID: {template_id}, 模板问题: {template_question}")
-        
+
+        # 隐式参数替换：模板中硬编码实体（如广东省）与用户问句实体（如四川省）对齐，无需改模板库
+        if user_question and constructed_sql:
+            replacements = extract_implicit_replacements(
+                constructed_sql, template_question, user_question
+            )
+            if replacements:
+                constructed_sql = apply_implicit_replacements(constructed_sql, replacements)
+
         # 检查必要字段是否存在
         if not constructed_sql:
             _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少sql-template字段")
@@ -1791,6 +1959,7 @@ class LLMService:
     def check_save_sql(self, res: str) -> str:
         sql, *_ = self.check_sql(res=res)
         sql = self._rewrite_jq_zbval_year_sys_datatime(sql)
+        sql = apply_business_rules(sql)
         save_sql(session=self.session, sql=sql, record_id=self.record.id, current_user=self.current_user)
 
         self.chat_question.sql = sql
@@ -1931,13 +2100,34 @@ class LLMService:
     def run_task(self, in_chat: bool = True, stream: bool = True,
                  finish_step: ChatFinishStep = ChatFinishStep.GENERATE_CHART):
         json_result: Dict[str, Any] = {'success': True}
+        # 单请求内问题增强只执行一次，避免 LLM 被重复调用 3 次及“过度增强”
+        self._question_enhanced = False
         try:
             training_data = []
             if self.ds:
                 oid = self.ds.oid if isinstance(self.ds, CoreDatasource) else 1
                 ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
-                
-                # 步骤2：术语检索
+
+                # Step 1: 上下文分析与问题增强（先于所有检索，保证表/SQL 模板检索使用完整语义）
+                if self.original_question is None:
+                    self.original_question = self.chat_question.question
+                if len(self.generate_sql_logs) > 0:
+                    reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
+                    has_reference = any(word in (self.chat_question.question or '') for word in reference_words)
+                    is_followup = is_any_follow_up(self.chat_question.question or '')
+                    if has_reference or is_followup:
+                        context_manager = ContextStateManager(self.session, self.current_user)
+                        original_q = self.chat_question.question
+                        enhanced = context_manager.enhance_question_with_history(
+                            original_q,
+                            self.generate_sql_logs
+                        )
+                        if enhanced and enhanced.strip() != (original_q or '').strip():
+                            self.chat_question.question = enhanced.strip()
+                            self._question_enhanced = True
+                            _async_log_util.info(f"[问题增强-Step1] 检索前补全 - 原始: {original_q[:50]}, 增强后: {self.chat_question.question[:80]}")
+
+                # 步骤2：术语检索（使用增强后问题）
                 if in_chat:
                     yield 'data:' + orjson.dumps({
                         'type': 'step-start',
@@ -1946,25 +2136,8 @@ class LLMService:
                         'description': '正在检索相关业务术语...'
                     }).decode() + '\n\n'
                 
-                # 多轮对话增强：指代词或任意追问（时间/地区/指标/公司主体）时，结合历史问题检索术语
-                terminology_query = self.chat_question.question
-                if len(self.generate_sql_logs) > 0:
-                    reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
-                    has_reference = any(word in self.chat_question.question for word in reference_words)
-                    is_followup = is_any_follow_up(self.chat_question.question)
-                    
-                    if has_reference or is_followup:
-                        latest_log = self.generate_sql_logs[-1]
-                        if latest_log.messages:
-                            for msg in latest_log.messages:
-                                if msg.get('type') == 'human':
-                                    history_question = msg.get('content', '')
-                                    if history_question:
-                                        terminology_query = f"{history_question} {self.chat_question.question}"
-                                        trigger_type = "追问" if is_followup else "指代词"
-                                        _async_log_util.info(f"[术语检索增强] 检测到{trigger_type}，结合历史问题检索术语: {terminology_query[:200]}")
-                                        break
-                
+                # 使用增强后问题检索术语（Step1 已先执行问题增强）
+                terminology_query = self.chat_question.question or ""
                 terminology_template, terminology_data = get_terminology_template_with_data(
                     self.session, terminology_query, oid, ds_id)
                 self.chat_question.terminologies = terminology_template
@@ -2000,25 +2173,26 @@ class LLMService:
                         'description': '正在检索相似SQL示例...'
                     }).decode() + '\n\n'
                 
-                # 追问场景：训练数据检索前先做问题增强，使用增强后的问题检索（与术语检索、init_messages 一致）
-                training_query = self.chat_question.question
-                if len(self.generate_sql_logs) > 0:
-                    reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
-                    has_reference = any(word in self.chat_question.question for word in reference_words)
-                    is_followup = is_any_follow_up(self.chat_question.question)
-                    if has_reference or is_followup:
-                        context_manager = ContextStateManager(self.session, self.current_user)
-                        enhanced = context_manager.enhance_question_with_history(
-                            self.chat_question.question,
-                            self.generate_sql_logs
-                        )
-                        if enhanced != self.chat_question.question:
-                            training_query = enhanced
-                            _async_log_util.info(f"[训练数据检索-追问增强] 原始: {self.chat_question.question[:50]}, 增强后: {training_query[:80]}")
-                
+                # 使用增强后问题检索 SQL 模板（Step1 已先执行问题增强，此处直接复用）
+                training_query = self.chat_question.question or ""
                 training_template, sql_info_templates, training_data = get_training_template_with_data(self.session, training_query, ds_id, oid)
-                self.chat_question.data_training = training_template
-                
+                # 实体类型一致性过滤：用户问「地区」时剔除「公司/集团」维度模板，避免误匹配（如海南省 vs 集团各产业）
+                training_data_filtered = filter_training_data_by_entity_type(
+                    training_data,
+                    self.chat_question.question or "",
+                )
+                if training_data_filtered:
+                    self.chat_question.data_training = get_base_data_training_template().format(
+                        data_training=to_xml_string(training_data_filtered, need_template=True)
+                    )
+                    training_data = training_data_filtered
+                else:
+                    self.chat_question.data_training = get_base_data_training_template().format(
+                        data_training=to_xml_string([], need_template=True)
+                    )
+                    training_data = []
+                    _async_log_util.info("[快速模板匹配] 实体过滤后无兼容模板，将走正常SQL生成流程")
+
                 # 记录embedding配置状态
                 _async_log_util.info(f"[Embedding配置检查] EMBEDDING_ENABLED={settings.EMBEDDING_ENABLED}, EMBEDDING_DATA_TRAINING_SIMILARITY={settings.EMBEDDING_DATA_TRAINING_SIMILARITY}, EMBEDDING_DATA_TRAINING_TOP_COUNT={settings.EMBEDDING_DATA_TRAINING_TOP_COUNT}")
                 _async_log_util.info(f"[Embedding配置检查] TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED}, TABLE_EMBEDDING_COUNT={settings.TABLE_EMBEDDING_COUNT}")
@@ -2225,7 +2399,9 @@ class LLMService:
             if status:
                 # 尝试使用快速模板（无论二次校验是否通过，只要首次匹配成功就尝试）
                 try:
-                    full_sql_text = self.generate_straight_sql(training_data, full_straight_sql_text)
+                    full_sql_text = self.generate_straight_sql(
+                        training_data, full_straight_sql_text, self.chat_question.question or ""
+                    )
                     _async_log_util.info(f"[快速模板] 成功使用快速模板生成SQL - 模板ID: {matched_id}, 用户问题: {self.chat_question.question[:100]}")
                     
                     # 快速模板匹配成功，保存日志

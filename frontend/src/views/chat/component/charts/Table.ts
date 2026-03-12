@@ -7,7 +7,9 @@ function isNumericValue(value: unknown): boolean {
   if (value === null || value === undefined || value === '') return false
   if (typeof value === 'number' && !Number.isNaN(value)) return true
   const s = String(value).trim()
-  if (/^-?\d+(\.\d+)?$/.test(s)) return true
+  // 支持千分位（如 1,099）、百分号（如 3.74%）等格式，去掉逗号与末尾 % 后再判断
+  const normalized = s.replace(/,/g, '').replace(/%\s*$/, '')
+  if (/^-?\d+(\.\d+)?$/.test(normalized)) return true
   return false
 }
 
@@ -26,6 +28,10 @@ class AlignTableDataCell extends TableDataCell {
   }
 }
 
+const TABLE_HEADER_HEIGHT = 40
+const TABLE_ROW_HEIGHT = 32
+const TABLE_MAX_HEIGHT = 360
+
 export class Table extends BaseChart {
   table?: TableSheet = undefined
 
@@ -35,20 +41,23 @@ export class Table extends BaseChart {
 
   resizeObserver: ResizeObserver
 
+  /** 按内容计算出的表格高度，resize 时保持不随父容器拉高 */
+  private tableHeight: number = TABLE_MAX_HEIGHT
+
   constructor(id: string) {
     super(id, 'table')
     this.container = document.getElementById(id)
 
-    this.debounceRender = debounce(async (width?: number, height?: number) => {
+    this.debounceRender = debounce(async (width?: number) => {
       if (this.table) {
-        this.table.changeSheetSize(width, height)
+        this.table.changeSheetSize(width, this.tableHeight)
         await this.table.render(false)
       }
     }, 200)
 
     this.resizeObserver = new ResizeObserver(([entry] = []) => {
       const [size] = entry.borderBoxSize || []
-      this.debounceRender(size.inlineSize, size.blockSize)
+      this.debounceRender(size.inlineSize)
     })
 
     if (this.container?.parentElement) {
@@ -178,7 +187,19 @@ export class Table extends BaseChart {
     return summaryRow
   }
 
-  // 处理数据：添加序号列、格式化数值，可选添加汇总行（构成类问题不汇总）
+  /** 按所有数据列去重，保留首次出现的行 */
+  private deduplicateRows(axis: Array<ChartAxis>, data: Array<ChartData>): Array<ChartData> {
+    if (!data?.length || !axis?.length) return data ?? []
+    const seen = new Set<string>()
+    return data.filter((row) => {
+      const key = axis.map((a) => String(row[a.value] ?? '')).join('\u0001')
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  // 处理数据：按行去重后添加序号列、格式化数值，可选添加汇总行（构成类问题不汇总）
   private processData(
     axis: Array<ChartAxis>,
     data: Array<ChartData>,
@@ -188,6 +209,8 @@ export class Table extends BaseChart {
       return { processedAxis: axis, processedData: [] }
     }
 
+    const dataToProcess = this.deduplicateRows(axis, data)
+
     // 添加序号列
     const indexAxis: ChartAxis = {
       name: '序号',
@@ -195,8 +218,8 @@ export class Table extends BaseChart {
     }
     const processedAxis = [indexAxis, ...axis]
 
-    // 处理数据：添加序号和格式化数值
-    const processedData = data.map((row, index) => {
+    // 处理数据：添加序号和格式化数值（汇总行基于去重后的数据计算）
+    const processedData = dataToProcess.map((row, index) => {
       const processedRow: ChartData = {
         __index__: index + 1,
       }
@@ -214,7 +237,7 @@ export class Table extends BaseChart {
     })
 
     if (addSummaryRow) {
-      const summaryRow = this.calculateSummaryRow(axis, data)
+      const summaryRow = this.calculateSummaryRow(axis, dataToProcess)
       processedData.push(summaryRow)
     }
 
@@ -241,9 +264,12 @@ export class Table extends BaseChart {
       data: this.data,
     }
 
+    const tableContentHeight = TABLE_HEADER_HEIGHT + processedData.length * TABLE_ROW_HEIGHT
+    this.tableHeight = Math.min(TABLE_MAX_HEIGHT, Math.max(tableContentHeight, TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT))
+
     const s2Options: S2Options = {
       width: 600,
-      height: 360,
+      height: this.tableHeight,
       placeholder: {
         cell: '-',
         empty: {
@@ -257,6 +283,7 @@ export class Table extends BaseChart {
 
     if (this.container) {
       this.table = new TableSheet(this.container, s2DataConfig, s2Options)
+      ;(this.container as HTMLElement).style.height = `${this.tableHeight}px`
     }
   }
 

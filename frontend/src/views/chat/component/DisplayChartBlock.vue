@@ -82,7 +82,7 @@ defineExpose({
 </script>
 
 <template>
-  <div v-if="message.record?.chart" class="chart-base-container">
+  <div v-if="message.record?.chart" class="chart-base-container" :class="{ 'chart-base-container--table': chartType === 'table' }">
     <ChartComponent
       v-if="message.record.id && data?.length > 0"
       :id="id ?? 'default_chat_id'"
@@ -105,5 +105,9 @@ defineExpose({
   width: 100%;
   border-radius: 12px;
   background: rgba(224, 224, 226, 0.29);
+
+  &.chart-base-container--table {
+    height: auto;
+  }
 }
 </style>

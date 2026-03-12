@@ -133,6 +133,28 @@ class Settings(BaseSettings):
     CONTEXT_ARBITRATOR_MODEL: str = Field(default="Qwen3.5-9B", description="仲裁者模型名称")
     CONTEXT_ARBITRATOR_TIMEOUT: float = Field(default=5.0, description="仲裁者调用超时秒数")
 
+    # 问题增强 LLM（多轮追问补全：规则未命中时用 LLM 做语义重写，与仲裁者同方式 API 接入）
+    QUESTION_ENHANCE_API_URL: str = Field(
+        default="",
+        description="问题增强 LLM API 地址（OpenAI 兼容 /chat/completions），留空则仅用规则增强",
+    )
+    QUESTION_ENHANCE_MODEL: str = Field(default="Qwen3.5-9B", description="问题增强模型名称")
+    QUESTION_ENHANCE_TIMEOUT: float = Field(default=8.0, description="问题增强 LLM 调用超时秒数")
+    QUESTION_ENHANCE_MAX_TURNS: int = Field(default=5, description="参与 LLM 补全的历史对话轮数（3-5 轮）")
+
+    # 隐式参数提取（模板中硬编码实体→用户实体对齐，与问题增强同方式 API 接入；留空则跳过）
+    IMPLICIT_PARAM_EXTRACT_API_URL: str = Field(
+        default="",
+        description="隐式参数提取 LLM API 地址（OpenAI 兼容），留空则不做隐式替换",
+    )
+    IMPLICIT_PARAM_EXTRACT_MODEL: str = Field(default="Qwen3.5-9B", description="隐式参数提取使用的模型名称")
+    IMPLICIT_PARAM_EXTRACT_TIMEOUT: float = Field(default=8.0, description="隐式参数提取调用超时秒数")
+
+    # 分析反思与修正（基于真实数据对初版报告做事实核查与清洗）
+    ANALYSIS_REFLECTION_ENABLED: bool = Field(default=True, description="是否启用分析反思修正节点（建议开启）")
+    ANALYSIS_REFLECTION_MODEL: str = Field(default="Qwen3.5-9B", description="分析反思修正使用的模型名称")
+    ANALYSIS_REFLECTION_TIMEOUT: float = Field(default=10.0, description="分析反思修正调用超时秒数")
+
     GUESS_SCHEMA_TABLE_COUNT: int = Field(default=5, description="猜你想问场景 schema pruning 返回表数量（建议 3-5）")
     GUESS_SCHEMA_INCLUDE_VALUE_HINTS: bool = Field(default=True, description="猜你想问 schema 是否注入深表字段值域示例")
     GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")

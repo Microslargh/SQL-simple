@@ -88,10 +88,50 @@ class ContextStateManager:
             _async_log_util.info(f"[问题增强] 当前问句已含明确地区与指标，跳过 LLM 与规则，直接返回: {q[:60]}")
             return current_question
 
+        # 仅“X月份”无年份时，优先用上一轮 SQL 时间补全年份，避免 LLM 误补成 2024 等
+        if re.search(r"(?:十一|十二|[一二三四五六七八九十])月份", q) and not re.search(r"\d{4}年", q):
+            latest_log = history_logs[-1]
+            if latest_log and getattr(latest_log, "pid", None):
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and getattr(record, "sql", None) and record.sql:
+                    try:
+                        time_range = self.entity_extractor.extract_time_range(record.sql)
+                        if time_range:
+                            ref_ym = time_range.get("time") or time_range.get("end") or time_range.get("start")
+                            if ref_ym and len(str(ref_ym)) >= 4:
+                                ref_year = str(ref_ym)[:4]
+                                enhanced = re.sub(
+                                    r"((?:十一|十二|[一二三四五六七八九十])月份)",
+                                    ref_year + r"年\1",
+                                    q,
+                                    count=1,
+                                )
+                                if enhanced != q:
+                                    _async_log_util.info(f"[问题增强-月份] 从上一轮SQL取年份 {ref_year}，补全: {q[:50]} -> {enhanced[:60]}")
+                                    return enhanced
+                    except Exception as e:
+                        _async_log_util.debug(f"[问题增强-月份] 从历史SQL取年份失败: {e}")
+
         # 【治本】LLM 优先：若已配置且有多轮历史，先调 LLM；LLM 一旦返回有效结果则立即 return，严禁再执行任何规则，杜绝“LLM 结果被规则二次拼接”
         api_url = (getattr(settings, "QUESTION_ENHANCE_API_URL", "") or "").strip().rstrip("/")
         if api_url and history_turns:
-            llm_rewritten = rewrite_question_with_llm(history_turns, current_question or "")
+            reference_time_str = None
+            latest_log = history_logs[-1]
+            if latest_log and getattr(latest_log, "pid", None):
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and getattr(record, "sql", None) and record.sql:
+                    try:
+                        time_range = self.entity_extractor.extract_time_range(record.sql)
+                        if time_range:
+                            ref_ym = time_range.get("time") or time_range.get("end") or time_range.get("start")
+                            if ref_ym and len(str(ref_ym)) >= 6:
+                                y, m = str(ref_ym)[:4], str(ref_ym)[4:6].lstrip("0") or "0"
+                                reference_time_str = f"{y}年{m}月" if m != "0" else f"{y}年"
+                    except Exception:
+                        pass
+            llm_rewritten = rewrite_question_with_llm(
+                history_turns, current_question or "", reference_time_str=reference_time_str
+            )
             if llm_rewritten and llm_rewritten.strip():
                 _async_log_util.info(f"[问题增强-LLM] 采用 LLM 补全，直接返回（不再执行规则）: {llm_rewritten[:80]}")
                 return llm_rewritten.strip()

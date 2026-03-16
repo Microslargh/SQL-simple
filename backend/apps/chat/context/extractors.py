@@ -363,13 +363,19 @@ class IntentContinuityAnalyzer:
 
 
 class FilterSlotExtractor:
-    """从历史 SQL 的 WHERE 子句提取过滤条件（槽位），供语义仲裁者使用"""
+    """从历史 SQL 的 WHERE 子句提取过滤条件（槽位），供语义仲裁者使用
+
+    注意：is_exit_press_reduce（压减系统）与 sfbb（并表）是不同口径，不可混用：
+    - is_exit_press_reduce = '是' → 压减系统，通常不应被丢弃
+    - sfbb IN ('1','2') → 并表口径，分布意图时需丢弃
+    """
 
     FIELD_TO_SLOT = {
         "year": "year",
         "month": "month",
         "create_date": "create_date",
-        "is_exit_press_reduce": "is_consolidated",
+        "is_exit_press_reduce": "is_exit_press_reduce",  # 压减系统，与并表分离
+        "sfbb": "is_consolidated",  # 并表口径
         "is_consolidated": "is_consolidated",
         "register_status": "register_status",
         "name_1": "region",
@@ -401,7 +407,12 @@ class FilterSlotExtractor:
             slot_key = cls.FIELD_TO_SLOT.get(field.lower(), field.lower())
             slots[slot_key] = val
 
-        if "is_exit_press_reduce" in sql.lower() and "是" in sql:
+        # sfbb IN ('1','2') 或 sfbb IN ('1', '2', '3') 等 → 并表口径（is_consolidated）
+        sfbb_in = re.search(
+            r'["\']?sfbb["\']?\s+IN\s*\([^)]+\)',
+            sql, re.IGNORECASE
+        )
+        if sfbb_in:
             slots["is_consolidated"] = "1"
 
         _async_log_util.info(f"[上下文提取] 从 SQL 提取槽位: {slots}")

@@ -77,7 +77,7 @@ class ContextPromptBuilder:
         # 应丢弃的过滤条件（语义仲裁：子集过滤与全量分布冲突时）
         if context.slots_to_discard:
             slot_to_field = {
-                "is_consolidated": "is_exit_press_reduce、is_consolidated（并表/压减）",
+                "is_consolidated": "sfbb（并表口径）",
                 "register_status": "register_status（注册状态）",
             }
             discard_hints = []

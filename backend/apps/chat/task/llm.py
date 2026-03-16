@@ -415,10 +415,12 @@ class LLMService:
                     # 将上下文作为单独的消息添加到提示中
                     context_message = f"<context>\n{context_prompt}\n</context>"
                     self.sql_message.append(HumanMessage(content=context_message))
+                    self._context_prompt_cache = context_prompt  # 供 init_straight_messages 复用，避免重复分析+仲裁
                     _async_log_util.info(f"[多轮对话] 已添加结构化上下文提示，长度: {len(context_prompt)} 字符")
                 else:
                     _async_log_util.info(f"[多轮对话] 上下文提取完成，但无有效上下文内容")
             else:
+                self._context_prompt_cache = ""  # 标记本请求已分析过、无需上下文，供快速模板分支跳过重复分析
                 _async_log_util.info(f"[多轮对话] 当前问题无需上下文信息")
         else:
             _async_log_util.info(f"[多轮对话] 无历史SQL日志，这是第一轮对话")
@@ -484,39 +486,43 @@ class LLMService:
         # add straight prompt
         self.straight_messages.append(SystemMessage(content=self.chat_question.sql_straight_question()))
         
-        # 使用上下文管理器进行智能上下文提取（与init_messages()相同的逻辑）
+        # 使用上下文管理器进行智能上下文提取；同请求内若 init_messages 已算过则复用缓存，避免重复分析+仲裁者调用
         if len(self.generate_sql_logs) > 0:
-            _async_log_util.info(f"[多轮对话-快速模板] 开始智能上下文分析，历史日志数量: {len(self.generate_sql_logs)}")
-            
-            context_manager = ContextStateManager(self.session, self.current_user)
-            # 使用原始问题检测时间追问等模式，但使用扩展后的问题进行上下文提取
-            original_question = self.original_question if self.original_question else enhanced_question
-            context_needs = context_manager.analyze_context_needs(
-                original_question,  # 使用原始问题检测时间追问
-                self.generate_sql_logs
-            )
-            
-            if context_needs.needs_any_context():
-                structured_context = context_manager.extract_context(
-                    context_needs, 
-                    self.generate_sql_logs,
-                    current_question=enhanced_question
-                )
-                context_prompt = context_manager.build_context_prompt(
-                    structured_context,
-                    current_question=enhanced_question,
-                    history_logs=self.generate_sql_logs
-                )
-                
-                if context_prompt:
-                    # 将上下文作为单独的消息添加到提示中
-                    context_message = f"<context>\n{context_prompt}\n</context>"
+            cached = getattr(self, "_context_prompt_cache", None)
+            if cached is not None:
+                if cached:
+                    context_message = f"<context>\n{cached}\n</context>"
                     self.straight_messages.append(HumanMessage(content=context_message))
-                    _async_log_util.info(f"[多轮对话-快速模板] 已添加结构化上下文提示，长度: {len(context_prompt)} 字符")
+                    _async_log_util.info(f"[多轮对话-快速模板] 复用已缓存的上下文提示，长度: {len(cached)} 字符（避免重复分析）")
                 else:
-                    _async_log_util.info(f"[多轮对话-快速模板] 上下文提取完成，但无有效上下文内容")
+                    _async_log_util.info(f"[多轮对话-快速模板] 复用：当前问题无需上下文（避免重复分析）")
             else:
-                _async_log_util.info(f"[多轮对话-快速模板] 当前问题无需上下文信息")
+                _async_log_util.info(f"[多轮对话-快速模板] 开始智能上下文分析，历史日志数量: {len(self.generate_sql_logs)}")
+                context_manager = ContextStateManager(self.session, self.current_user)
+                original_question = self.original_question if self.original_question else enhanced_question
+                context_needs = context_manager.analyze_context_needs(
+                    original_question,
+                    self.generate_sql_logs
+                )
+                if context_needs.needs_any_context():
+                    structured_context = context_manager.extract_context(
+                        context_needs,
+                        self.generate_sql_logs,
+                        current_question=enhanced_question
+                    )
+                    context_prompt = context_manager.build_context_prompt(
+                        structured_context,
+                        current_question=enhanced_question,
+                        history_logs=self.generate_sql_logs
+                    )
+                    if context_prompt:
+                        context_message = f"<context>\n{context_prompt}\n</context>"
+                        self.straight_messages.append(HumanMessage(content=context_message))
+                        _async_log_util.info(f"[多轮对话-快速模板] 已添加结构化上下文提示，长度: {len(context_prompt)} 字符")
+                    else:
+                        _async_log_util.info(f"[多轮对话-快速模板] 上下文提取完成，但无有效上下文内容")
+                else:
+                    _async_log_util.info(f"[多轮对话-快速模板] 当前问题无需上下文信息")
         else:
             _async_log_util.info(f"[多轮对话-快速模板] 无历史SQL日志，这是第一轮对话")
 
@@ -593,8 +599,10 @@ class LLMService:
         except Exception as e:
             _async_log_util.warning(f"[分析反思] 反思节点异常，已跳过: {e}")
 
-        # 仅输出修正后的最终稿（不输出思考过程，避免提示词泄露/机械推理）
-        yield {"content": full_analysis_text, "reasoning_content": ""}
+        # 流式输出修正后的最终稿：按句/段分块 yield，前端可逐块追加展示
+        for chunk in _stream_text_chunks(full_analysis_text, chunk_size=80):
+            if chunk:
+                yield {"content": chunk, "reasoning_content": ""}
 
         analysis_msg.append(AIMessage(full_analysis_text))
 
@@ -603,7 +611,7 @@ class LLMService:
                                                                 OperationEnum.ANALYSIS],
                                                             full_message=[
                                                                 {'type': msg.type,
-                                                                 'content': msg.content}
+                                                                  'content': msg.content}
                                                                 for msg in analysis_msg],
                                                             reasoning_content=full_thinking_text,
                                                             token_usage=token_usage)
@@ -774,8 +782,10 @@ class LLMService:
         except Exception as e:
             _async_log_util.warning(f"[分析反思] 反思节点异常，已跳过: {e}")
 
-        # 仅输出修正后的最终稿（不输出思考过程）
-        yield {"content": full_analysis_text, "reasoning_content": ""}
+        # 流式输出修正后的最终稿：按句或按段分块 yield，前端可逐块追加展示
+        for chunk in _stream_text_chunks(full_analysis_text, chunk_size=80):
+            if chunk:
+                yield {"content": chunk, "reasoning_content": ""}
 
         analysis_msg.append(AIMessage(full_analysis_text))
 
@@ -1363,7 +1373,8 @@ class LLMService:
         template_type = infer_entity_type(template_question)
         if user_type != template_type and user_type in (ENTITY_REGION, ENTITY_COMPANY_INDUSTRY) and template_type in (ENTITY_REGION, ENTITY_COMPANY_INDUSTRY):
             _async_log_util.info(
-                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 实体类型冲突: 用户={user_type}, 模板={template_type}"
+                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                f"实体类型冲突: 用户={user_type}, 模板={template_type}"
             )
             return False
 
@@ -1372,9 +1383,40 @@ class LLMService:
         for kw in _SCOPE_KEYWORDS:
             if kw in template_question and kw not in user_question:
                 _async_log_util.info(
-                    f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板含「{kw}」而用户问题未提及，直接判不匹配"
+                    f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                    f"模板含「{kw}」而用户问题未提及，直接判不匹配"
                 )
                 return False
+
+        # 统计口径预检：并表 vs 非并表 互斥（SQL 筛选条件不同，不能混用）
+        _CONSOLIDATED_MARKERS = ("并表", "合并")
+        user_has_consolidated = any(m in user_question for m in _CONSOLIDATED_MARKERS)
+        template_has_consolidated = any(m in template_question for m in _CONSOLIDATED_MARKERS)
+        if user_has_consolidated != template_has_consolidated:
+            _async_log_util.info(
+                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                f"并表口径不一致: 用户含并表={user_has_consolidated}, 模板含并表={template_has_consolidated}"
+            )
+            return False
+
+        # 存续口径预检：模板含「存续」而用户未提、或用户含「存续」而模板未提，均不匹配（SQL 筛选不同）
+        if ("存续" in template_question) != ("存续" in user_question):
+            _async_log_util.info(
+                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                f"存续口径不一致: 模板含存续={'存续' in template_question}, 用户含存续={'存续' in user_question}"
+            )
+            return False
+
+        # 明细 vs 汇总预检：用户要「明细/列表/导出明细」而模板问句无明细/列表/导出，不匹配（SQL 结构不同）
+        _DETAIL_MARKERS = ("明细", "列表", "导出", "详情", "清单")
+        user_wants_detail = any(m in user_question for m in _DETAIL_MARKERS)
+        template_has_detail = any(m in template_question for m in _DETAIL_MARKERS)
+        if user_wants_detail and not template_has_detail:
+            _async_log_util.info(
+                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                f"用户要明细/列表而模板为汇总: 用户含明细类词=True, 模板含=False"
+            )
+            return False
 
         double_check_messages = [
             SystemMessage(
@@ -1382,9 +1424,9 @@ class LLMService:
             HumanMessage(
                 self.chat_question.sql_user_question(current_time=self._get_effective_current_time()))]
 
-        # 二次校验时用于排查：若用户问题与模板问题一致仍判 False，可对比此日志
+        # 二次校验时用于排查：若用户问题与模板问题一致仍判 False，可对比此日志（模板问题完整输出便于对比）
         _async_log_util.info(
-            f"[快速模板匹配] 二次校验入参 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 当前用户问题: {self.chat_question.question[:80]}"
+            f"[快速模板匹配] 二次校验入参 - 模板ID: {template_id}, 模板问题: {template_question}, 当前用户问题: {(self.chat_question.question or '')[:120]}"
         )
         token_usage = {}
         res = process_stream(self.llm.stream(double_check_messages), token_usage)
@@ -1414,7 +1456,8 @@ class LLMService:
 
         if not bool_lines:
             _async_log_util.info(
-                f"[快速模板匹配] 二次校验无法解析True/False（可能模型未按「最后一行只返回True或False」输出） - 模型完整回复:\n{content_str[:800]}"
+                f"[快速模板匹配] 二次校验无法解析True/False - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                f"可能模型未按「最后一行只返回True或False」输出，模型完整回复:\n{content_str[:800]}"
             )
             return False
 
@@ -1423,12 +1466,15 @@ class LLMService:
             reasoning_text = " ".join(lines[: bool_lines[0][0]]) if bool_lines else ""
             if any(kw in reasoning_text for kw in ("一致", "匹配", "可以使用", "符合", "满足")):
                 _async_log_util.info(
-                    f"[快速模板匹配] 二次校验通过 - 模型同时输出True/False，推理含匹配表述，取True"
+                    f"[快速模板匹配] 二次校验通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                    f"模型同时输出True/False，推理含匹配表述，取True"
                 )
                 return True
             # 推理含否定表述则取 False
             if any(kw in reasoning_text for kw in ("不一致", "不匹配", "不符合", "不满足", "不能使用")):
-                _async_log_util.info(f"[快速模板匹配] 二次校验返回False - 模型推理含不匹配表述")
+                _async_log_util.info(
+                    f"[快速模板匹配] 二次校验返回False - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 模型推理含不匹配表述"
+                )
                 return False
             # 无法从推理判断时，取最后一次出现（保持原逻辑）
             result = bool_lines[-1][1]
@@ -1436,9 +1482,11 @@ class LLMService:
             result = bool_lines[0][1]
 
         if result:
-            _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模型返回: True")
+            _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 模型返回: True")
             return True
-        _async_log_util.info(f"[快速模板匹配] 二次校验返回False - 模型完整回复:\n{content_str[:500]}")
+        _async_log_util.info(
+            f"[快速模板匹配] 二次校验返回False - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 模型完整回复:\n{content_str[:500]}"
+        )
         return False
 
 
@@ -1606,6 +1654,28 @@ class LLMService:
                 constructed_sql = constructed_sql.replace(f"[[{key_var}]]", v_str)
                 # 2. [KEY] 格式（单方括号）
                 constructed_sql = constructed_sql.replace(f"[{key_var}]", v_str)
+
+        # 兜底：模板若硬编码了时间（无 [[TIME]] 占位符），隐式提取可能未改到，用 merged_kv 覆盖模板默认时间字面量
+        _TIME_KEYS = ("TIME", "DATE", "START_TIME", "END_TIME", "START_DATE", "END_DATE")
+        for tk in _TIME_KEYS:
+            if tk not in merged_kv:
+                continue
+            new_val = str(merged_kv[tk]).strip().strip("'").strip('"')
+            old_val = (default_kv or {}).get(tk)
+            if not old_val or new_val == str(old_val).strip().strip("'").strip('"'):
+                continue
+            old_str = str(old_val).strip()
+            for quote in ("'", '"'):
+                literal = quote + old_str + quote
+                literal_like = quote + old_str + "%" + quote
+                if literal in constructed_sql:
+                    constructed_sql = constructed_sql.replace(literal, quote + new_val + quote)
+                    _async_log_util.info(f"[快速模板] 模板ID {template_id} - 已用 merged_kv[{tk}]={new_val} 覆盖模板默认时间字面量 {literal}")
+                    break
+                if literal_like in constructed_sql:
+                    constructed_sql = constructed_sql.replace(literal_like, quote + new_val + "%" + quote)
+                    _async_log_util.info(f"[快速模板] 模板ID {template_id} - 已用 merged_kv[{tk}]={new_val} 覆盖模板默认时间 LIKE {literal_like}")
+                    break
 
         _async_log_util.info(f"[快速模板] 模板ID {template_id} - 生成的SQL预览: {constructed_sql[:200]}...")
         
@@ -2102,29 +2172,27 @@ class LLMService:
         json_result: Dict[str, Any] = {'success': True}
         # 单请求内问题增强只执行一次，避免 LLM 被重复调用 3 次及“过度增强”
         self._question_enhanced = False
+        self._context_prompt_cache = None  # 同请求内避免重复执行智能上下文分析与仲裁者
         try:
             training_data = []
             if self.ds:
                 oid = self.ds.oid if isinstance(self.ds, CoreDatasource) else 1
                 ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
 
-                # Step 1: 上下文分析与问题增强（先于所有检索，保证表/SQL 模板检索使用完整语义）
+                # Step 1: 上下文分析与问题增强（先于所有检索，保证术语/模板检索使用完整语义；有历史则一律先增强，避免「请导出25年5月的」等短句用残缺问句检索）
                 if self.original_question is None:
                     self.original_question = self.chat_question.question
                 if len(self.generate_sql_logs) > 0:
-                    reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
-                    has_reference = any(word in (self.chat_question.question or '') for word in reference_words)
-                    is_followup = is_any_follow_up(self.chat_question.question or '')
-                    if has_reference or is_followup:
-                        context_manager = ContextStateManager(self.session, self.current_user)
-                        original_q = self.chat_question.question
-                        enhanced = context_manager.enhance_question_with_history(
-                            original_q,
-                            self.generate_sql_logs
-                        )
-                        if enhanced and enhanced.strip() != (original_q or '').strip():
-                            self.chat_question.question = enhanced.strip()
-                            self._question_enhanced = True
+                    context_manager = ContextStateManager(self.session, self.current_user)
+                    original_q = self.chat_question.question
+                    enhanced = context_manager.enhance_question_with_history(
+                        original_q,
+                        self.generate_sql_logs
+                    )
+                    if enhanced and enhanced.strip():
+                        self.chat_question.question = enhanced.strip()
+                        self._question_enhanced = True
+                        if enhanced.strip() != (original_q or '').strip():
                             _async_log_util.info(f"[问题增强-Step1] 检索前补全 - 原始: {original_q[:50]}, 增强后: {self.chat_question.question[:80]}")
 
                 # 步骤2：术语检索（使用增强后问题）
@@ -2197,11 +2265,14 @@ class LLMService:
                 _async_log_util.info(f"[Embedding配置检查] EMBEDDING_ENABLED={settings.EMBEDDING_ENABLED}, EMBEDDING_DATA_TRAINING_SIMILARITY={settings.EMBEDDING_DATA_TRAINING_SIMILARITY}, EMBEDDING_DATA_TRAINING_TOP_COUNT={settings.EMBEDDING_DATA_TRAINING_TOP_COUNT}")
                 _async_log_util.info(f"[Embedding配置检查] TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED}, TABLE_EMBEDDING_COUNT={settings.TABLE_EMBEDDING_COUNT}")
                 
-                # 记录训练数据检索结果
+                # 记录训练数据检索结果（含每个模板ID与模板问题）
                 _async_log_util.info(f"[快速模板匹配] 检索到 {len(training_data)} 条相似SQL示例 - 检索用问题: {training_query[:100]}")
                 if training_data:
                     template_ids = [str(t.get('id', 'unknown')) for t in training_data[:5]]
                     _async_log_util.info(f"[快速模板匹配] 前5个模板ID: {', '.join(template_ids)}")
+                    for t in training_data[:10]:
+                        tid, tq = t.get('id', 'unknown'), (t.get('question') or '')[:120]
+                        _async_log_util.info(f"[快速模板匹配] 数据训练检索 - 模板ID: {tid}, 模板问题: {tq}")
                 
                 if in_chat:
                     yield 'data:' + orjson.dumps({
@@ -2350,11 +2421,6 @@ class LLMService:
                                         in self.straight_messages])
 
             straight_sql_res = self.generate_straight_sql_info()
-            # if settings.LOG_LEVEL == "DEBUG":
-            #     _async_log_util.info("DEBUG " * 100)
-            #     _async_log_util.info(self.straight_messages)
-            #     for i in straight_sql_res:
-            #         _async_log_util.info(i)
             full_straight_sql_text = ''
             full_straight_thinking_text = ''
             for chunk in straight_sql_res:
@@ -2367,32 +2433,43 @@ class LLMService:
                     yield 'data:' + orjson.dumps(
                         {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
                          'type': 'sql-result'}).decode() + '\n\n'
-            
+
             # 将AI响应添加到straight_messages中，用于日志记录
             self.straight_messages.append(AIMessage(content=full_straight_sql_text))
-            
+
             # 获取token_usage（从generate_straight_sql_info设置的实例变量）
             token_usage = getattr(self, 'straight_sql_token_usage', {})
-            
-            # if settings.LOG_LEVEL == "DEBUG":
-            #     _async_log_util.info("DEBUG " * 100)
-            #     _async_log_util.info(full_straight_sql_text)
             status, matched_id, infos = self.check_straight_sql(full_straight_sql_text)
-            
-            # 记录快速模板匹配结果
+
+            # 记录快速模板匹配结果（含匹配到的模板问题）
             if status:
-                _async_log_util.info(f"[快速模板匹配] 匹配成功 - 用户问题: {self.chat_question.question[:100]}, 匹配模板ID: {matched_id}, 匹配参数: {infos}")
+                template_question = ""
+                for t in (training_data or []):
+                    if str(t.get("id")) == str(matched_id):
+                        template_question = (t.get("question") or "")[:120]
+                        break
+                _async_log_util.info(
+                    f"[快速模板匹配] 匹配成功 - 用户问题: {(self.chat_question.question or '')[:100]}, 匹配模板ID: {matched_id}, "
+                    f"模板问题: {template_question}, 匹配参数: {infos}"
+                )
             else:
-                _async_log_util.info(f"[快速模板匹配] 未匹配 - 用户问题: {self.chat_question.question[:100]}, 将使用正常SQL生成流程")
+                _async_log_util.info(f"[快速模板匹配] 未匹配 - 用户问题: {(self.chat_question.question or '')[:100]}, 将使用正常SQL生成流程")
             
             double_check_ok = False
             if status:
                 double_check_ok = self.double_check_straight_sql_info(matched_id, infos, training_data)
+                tq_for_log = ""
+                for t in (training_data or []):
+                    if str(t.get("id")) == str(matched_id):
+                        tq_for_log = (t.get("question") or "")[:80]
+                        break
                 if double_check_ok:
-                    _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模板ID: {matched_id}")
+                    _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模板ID: {matched_id}, 模板问题: {tq_for_log}")
                 else:
                     # 二次校验未通过则中断模板路径，走正常 SQL 生成，避免无依据默认公司/时间
-                    _async_log_util.info(f"[快速模板匹配] 二次校验未通过，中断快速模板，使用正常SQL生成流程 - 模板ID: {matched_id}")
+                    _async_log_util.info(
+                        f"[快速模板匹配] 二次校验未通过，中断快速模板，使用正常SQL生成流程 - 模板ID: {matched_id}, 模板问题: {tq_for_log}"
+                    )
                     status = False
             
             chart_type = ""
@@ -2968,6 +3045,23 @@ def request_picture(chat_id: int, record_id: int, chart: dict, data: dict):
     request_path = urllib.parse.urljoin(settings.SERVER_IMAGE_HOST, f"{file_name}.png")
     
     return request_path
+
+
+def _stream_text_chunks(text: str, chunk_size: int = 80):
+    """将整段文本按句或按长度分块 yield，用于分析反思结果的流式输出。"""
+    if not text:
+        return
+    # 优先按句/段切（。！？\n），再按 chunk_size 长度
+    parts = re.split(r"(?<=[。！？\n])", text)
+    buf = ""
+    for p in parts:
+        buf += p
+        if len(buf) >= chunk_size or (p.strip() and buf.endswith(("。", "！", "？", "\n"))):
+            if buf.strip():
+                yield buf
+            buf = ""
+    if buf.strip():
+        yield buf
 
 
 def get_token_usage(chunk: BaseMessageChunk, token_usage: dict = None):

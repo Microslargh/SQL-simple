@@ -371,9 +371,8 @@ def select_training_by_question(session: SessionDep, question: str, oid: int, da
             'tables': row.tables,
         }
 
-    _results: list[dict] = []
-    for key in _map.keys():
-        _results.append(_map.get(key))
+    # 按 _ids 顺序构建结果，保留 Embedding 相似度降序（或文本匹配优先）顺序，避免被 DB 返回顺序打乱导致错选模板
+    _results: list[dict] = [_map[id] for id in _ids if id in _map]
 
     logger.info(f"[数据训练检索] 最终返回 {len(_results)} 条SQL示例 (文本匹配: {text_match_count}, Embedding匹配: {embedding_match_count})")
     if _results:

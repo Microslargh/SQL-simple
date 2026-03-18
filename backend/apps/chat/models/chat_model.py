@@ -133,6 +133,31 @@ class ErrorQueryRecord(SQLModel, table=True):
     create_time: datetime = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
 
 
+class ChatExecutionTraceStatus:
+    RUNNING = "running"
+    SUCCESS = "success"
+    ERROR = "error"
+
+
+class ChatExecutionTrace(SQLModel, table=True):
+    __tablename__ = "chat_execution_trace"
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    record_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联的 chat_record.id")
+    chat_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联的 chat.id")
+    create_by: int = Field(sa_column=Column(BigInteger, nullable=True), description="触发该链路的用户")
+    trace_group: str = Field(max_length=64, nullable=False, description="同一次请求链路的分组标识")
+    node_key: str = Field(max_length=64, nullable=False, description="节点英文标识")
+    node_name: str = Field(max_length=128, nullable=False, description="节点展示名称")
+    status: str = Field(max_length=20, nullable=False, default=ChatExecutionTraceStatus.RUNNING)
+    input_payload: Optional[dict] = Field(sa_column=Column(JSONB, nullable=True))
+    output_payload: Optional[dict] = Field(sa_column=Column(JSONB, nullable=True))
+    extra_data: Optional[dict] = Field(sa_column=Column(JSONB, nullable=True))
+    error_message: Optional[str] = Field(sa_column=Column(Text, nullable=True))
+    start_time: datetime = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
+    finish_time: Optional[datetime] = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
+    duration_ms: Optional[int] = Field(sa_column=Column(Integer, nullable=True))
+
+
 class ChatRecordResult(BaseModel):
     id: Optional[int] = None
     chat_id: Optional[int] = None
@@ -185,6 +210,24 @@ class ChatInfo(BaseModel):
     datasource_name: str = ''
     datasource_exists: bool = True
     records: List[ChatRecord | dict] = []
+
+
+class ChatExecutionTraceResult(BaseModel):
+    id: Optional[int] = None
+    record_id: int
+    chat_id: int
+    create_by: Optional[int] = None
+    trace_group: str
+    node_key: str
+    node_name: str
+    status: str
+    input_payload: Optional[dict] = None
+    output_payload: Optional[dict] = None
+    extra_data: Optional[dict] = None
+    error_message: Optional[str] = None
+    start_time: Optional[datetime] = None
+    finish_time: Optional[datetime] = None
+    duration_ms: Optional[int] = None
 
 
 class AiModelQuestion(BaseModel):

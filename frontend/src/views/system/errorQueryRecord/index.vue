@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ChatDotRound } from '@element-plus/icons-vue'
 import { errorQueryRecordApi, type ErrorQueryRecordItem } from '@/api/errorQueryRecord'
 import { formatTimestamp } from '@/utils/date'
 import { ElMessage, ElMessageBox } from 'element-plus-secondary'
 
+const router = useRouter()
 const tableData = ref<ErrorQueryRecordItem[]>([])
 const loading = ref(false)
 const filterStatus = ref<string>('') // '' 全部，pending 待解决，resolved 已解决
@@ -99,6 +101,17 @@ async function handleDelete(row: ErrorQueryRecordItem) {
   } catch {
     ElMessage.error('删除失败')
   }
+}
+
+function handleViewTrace(row: ErrorQueryRecordItem) {
+  if (!row.record_id) {
+    ElMessage.warning('该记录缺少 record_id，无法查看轨迹')
+    return
+  }
+  router.push({
+    path: '/system/execution-trace',
+    query: { recordId: String(row.record_id) },
+  })
 }
 
 onMounted(() => {
@@ -199,8 +212,9 @@ onMounted(() => {
             <pre class="cell-pre error-msg">{{ row.error_message || '-' }}</pre>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" align="center" fixed="right">
+        <el-table-column label="操作" width="150" align="center" fixed="right">
           <template #default="{ row }">
+            <el-button type="primary" link size="small" @click="handleViewTrace(row)">轨迹</el-button>
             <el-button type="danger" link size="small" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>

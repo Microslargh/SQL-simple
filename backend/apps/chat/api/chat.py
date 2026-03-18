@@ -13,7 +13,7 @@ from common.utils.utils import SQLBotLogUtil
 
 from apps.chat.curd.chat import list_chats, get_chat_with_records, create_chat, rename_chat, \
     delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, get_chat_record_by_id, \
-    create_error_query_record
+    create_error_query_record, list_execution_traces
 from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, ExcelData
 from apps.chat.task.llm import LLMService
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser, Trans
@@ -58,6 +58,14 @@ async def chat_record_data(session: SessionDep, chart_record_id: int, current_us
 async def chat_predict_data(session: SessionDep, chart_record_id: int, current_user: CurrentUser):
     def inner():
         return get_chat_predict_data(chart_record_id=chart_record_id, session=session, current_user=current_user)
+
+    return await asyncio.to_thread(inner)
+
+
+@router.get("/record/{chat_record_id}/trace")
+async def chat_execution_trace(session: SessionDep, chat_record_id: int, current_user: CurrentUser):
+    def inner():
+        return list_execution_traces(session=session, record_id=chat_record_id, current_user=current_user)
 
     return await asyncio.to_thread(inner)
 

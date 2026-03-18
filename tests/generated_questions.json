@@ -1,0 +1,230 @@
+[
+  {
+    "question": "一共有多少条demo_order的数据？",
+    "category": "count",
+    "difficulty": "easy",
+    "table": "demo_order",
+    "target_fields": []
+  },
+  {
+    "question": "demo_order的总记录数是多少？",
+    "category": "count",
+    "difficulty": "easy",
+    "table": "demo_order",
+    "target_fields": []
+  },
+  {
+    "question": "查看demo_order的前10条数据",
+    "category": "list",
+    "difficulty": "easy",
+    "table": "demo_order",
+    "target_fields": []
+  },
+  {
+    "question": "查看最近的demo_order数据",
+    "category": "list_sort",
+    "difficulty": "easy",
+    "table": "demo_order",
+    "target_fields": [
+      "order_date"
+    ]
+  },
+  {
+    "question": "查询2024年的demo_order数据",
+    "category": "filter_date",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "order_date"
+    ]
+  },
+  {
+    "question": "demo_order中quantity最高的前5条记录",
+    "category": "top_n",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "quantity"
+    ]
+  },
+  {
+    "question": "demo_order中quantity最低的前5条记录",
+    "category": "bottom_n",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "quantity"
+    ]
+  },
+  {
+    "question": "按customer_name统计demo_order的数量",
+    "category": "group_count",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "customer_name"
+    ]
+  },
+  {
+    "question": "按customer_name统计quantity的总和",
+    "category": "group_sum",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "customer_name",
+      "quantity"
+    ]
+  },
+  {
+    "question": "按customer_name统计quantity的平均值",
+    "category": "group_avg",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "customer_name",
+      "quantity"
+    ]
+  },
+  {
+    "question": "按product_category统计demo_order的数量",
+    "category": "group_count",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "product_category"
+    ]
+  },
+  {
+    "question": "按product_category统计quantity的总和",
+    "category": "group_sum",
+    "difficulty": "medium",
+    "table": "demo_order",
+    "target_fields": [
+      "product_category",
+      "quantity"
+    ]
+  },
+  {
+    "question": "各customer_name在demo_order中的占比分布",
+    "category": "ratio",
+    "difficulty": "hard",
+    "table": "demo_order",
+    "target_fields": [
+      "customer_name"
+    ]
+  },
+  {
+    "question": "一共有多少条example_orders的数据？",
+    "category": "count",
+    "difficulty": "easy",
+    "table": "example_orders",
+    "target_fields": []
+  },
+  {
+    "question": "example_orders的总记录数是多少？",
+    "category": "count",
+    "difficulty": "easy",
+    "table": "example_orders",
+    "target_fields": []
+  },
+  {
+    "question": "查看example_orders的前10条数据",
+    "category": "list",
+    "difficulty": "easy",
+    "table": "example_orders",
+    "target_fields": []
+  },
+  {
+    "question": "查看最近的example_orders数据",
+    "category": "list_sort",
+    "difficulty": "easy",
+    "table": "example_orders",
+    "target_fields": [
+      "order_date"
+    ]
+  },
+  {
+    "question": "查询2025年的example_orders数据",
+    "category": "filter_date",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "order_date"
+    ]
+  },
+  {
+    "question": "example_orders中quantity最高的前5条记录",
+    "category": "top_n",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "quantity"
+    ]
+  },
+  {
+    "question": "example_orders中quantity最低的前5条记录",
+    "category": "bottom_n",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "quantity"
+    ]
+  },
+  {
+    "question": "按customer_name统计example_orders的数量",
+    "category": "group_count",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "customer_name"
+    ]
+  },
+  {
+    "question": "按customer_name统计quantity的总和",
+    "category": "group_sum",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "customer_name",
+      "quantity"
+    ]
+  },
+  {
+    "question": "按customer_name统计quantity的平均值",
+    "category": "group_avg",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "customer_name",
+      "quantity"
+    ]
+  },
+  {
+    "question": "按product_category统计example_orders的数量",
+    "category": "group_count",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "product_category"
+    ]
+  },
+  {
+    "question": "按product_category统计quantity的总和",
+    "category": "group_sum",
+    "difficulty": "medium",
+    "table": "example_orders",
+    "target_fields": [
+      "product_category",
+      "quantity"
+    ]
+  },
+  {
+    "question": "各customer_name在example_orders中的占比分布",
+    "category": "ratio",
+    "difficulty": "hard",
+    "table": "example_orders",
+    "target_fields": [
+      "customer_name"
+    ]
+  }
+]

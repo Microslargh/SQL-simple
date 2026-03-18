@@ -1,17 +1,17 @@
 import datetime
-from typing import List
+from typing import Any, List
 
 import orjson
 import sqlparse
 from sqlalchemy import and_, select, update
-from sqlalchemy.orm import aliased
 
 from apps.chat.models.chat_model import Chat, ChatRecord, CreateChat, ChatInfo, RenameChat, ChatQuestion, ChatLog, \
-    TypeEnum, OperationEnum, ChatRecordResult, ErrorQueryRecord
+    TypeEnum, OperationEnum, ChatRecordResult, ErrorQueryRecord, ChatExecutionTrace, \
+    ChatExecutionTraceResult, ChatExecutionTraceStatus
 from apps.datasource.models.datasource import CoreDatasource
 from apps.system.crud.assistant import AssistantOutDsFactory
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser
-from common.utils.utils import extract_nested_json
+from common.utils.utils import extract_nested_json, prepare_for_orjson
 
 
 
@@ -151,6 +151,36 @@ def get_chat_with_records_with_data(session: SessionDep, chart_id: int, current_
 dynamic_ds_types = [1, 3]
 
 
+def _pick_latest_logs_by_record_ids(session: SessionDep, record_ids: list[int]) -> dict[tuple[int, OperationEnum], ChatLog]:
+    if not record_ids:
+        return {}
+    stmt = (
+        select(ChatLog)
+        .where(
+            and_(
+                ChatLog.pid.in_(record_ids),
+                ChatLog.type == TypeEnum.CHAT,
+                ChatLog.operate.in_([
+                    OperationEnum.GENERATE_SQL,
+                    OperationEnum.GENERATE_CHART,
+                    OperationEnum.ANALYSIS,
+                    OperationEnum.PREDICT_DATA,
+                ])
+            )
+        )
+        .order_by(ChatLog.pid, ChatLog.operate, ChatLog.finish_time.desc(), ChatLog.start_time.desc(), ChatLog.id.desc())
+    )
+    rows = session.execute(stmt).scalars().all()
+    latest_logs: dict[tuple[int, OperationEnum], ChatLog] = {}
+    for log in rows:
+        if log.pid is None:
+            continue
+        key = (int(log.pid), log.operate)
+        if key not in latest_logs:
+            latest_logs[key] = log
+    return latest_logs
+
+
 def get_chat_with_records(session: SessionDep, chart_id: int, current_user: CurrentUser,
                           current_assistant: CurrentAssistant, with_data: bool = False) -> ChatInfo:
     chat = session.get(Chat, chart_id)
@@ -177,76 +207,52 @@ def get_chat_with_records(session: SessionDep, chart_id: int, current_user: Curr
         chat_info.datasource_name = ds.name
         chat_info.ds_type = ds.type
 
-    sql_alias_log = aliased(ChatLog)
-    chart_alias_log = aliased(ChatLog)
-    analysis_alias_log = aliased(ChatLog)
-    predict_alias_log = aliased(ChatLog)
-
-    stmt = (select(ChatRecord.id, ChatRecord.chat_id, ChatRecord.create_time, ChatRecord.finish_time,
-                   ChatRecord.question, ChatRecord.sql_answer, ChatRecord.sql,
-                   ChatRecord.chart_answer, ChatRecord.chart, ChatRecord.analysis, ChatRecord.predict,
-                   ChatRecord.datasource_select_answer, ChatRecord.analysis_record_id, ChatRecord.predict_record_id,
-                   ChatRecord.recommended_question, ChatRecord.first_chat,
-                   ChatRecord.finish, ChatRecord.error,
-                   sql_alias_log.reasoning_content.label('sql_reasoning_content'),
-                   chart_alias_log.reasoning_content.label('chart_reasoning_content'),
-                   analysis_alias_log.reasoning_content.label('analysis_reasoning_content'),
-                   predict_alias_log.reasoning_content.label('predict_reasoning_content')
-                   )
-    .outerjoin(sql_alias_log, and_(sql_alias_log.pid == ChatRecord.id,
-                                   sql_alias_log.type == TypeEnum.CHAT,
-                                   sql_alias_log.operate == OperationEnum.GENERATE_SQL))
-    .outerjoin(chart_alias_log, and_(chart_alias_log.pid == ChatRecord.id,
-                                     chart_alias_log.type == TypeEnum.CHAT,
-                                     chart_alias_log.operate == OperationEnum.GENERATE_CHART))
-    .outerjoin(analysis_alias_log, and_(analysis_alias_log.pid == ChatRecord.id,
-                                        analysis_alias_log.type == TypeEnum.CHAT,
-                                        analysis_alias_log.operate == OperationEnum.ANALYSIS))
-    .outerjoin(predict_alias_log, and_(predict_alias_log.pid == ChatRecord.id,
-                                       predict_alias_log.type == TypeEnum.CHAT,
-                                       predict_alias_log.operate == OperationEnum.PREDICT_DATA))
-    .where(and_(ChatRecord.create_by == current_user.id, ChatRecord.chat_id == chart_id)).order_by(
-        ChatRecord.create_time))
-    if with_data:
-        stmt = select(ChatRecord.id, ChatRecord.chat_id, ChatRecord.create_time, ChatRecord.finish_time,
-                      ChatRecord.question, ChatRecord.sql_answer, ChatRecord.sql,
-                      ChatRecord.chart_answer, ChatRecord.chart, ChatRecord.analysis, ChatRecord.predict,
-                      ChatRecord.datasource_select_answer, ChatRecord.analysis_record_id, ChatRecord.predict_record_id,
-                      ChatRecord.recommended_question, ChatRecord.first_chat,
-                      ChatRecord.finish, ChatRecord.error, ChatRecord.data, ChatRecord.predict_data).where(
-            and_(ChatRecord.create_by == current_user.id, ChatRecord.chat_id == chart_id)).order_by(
-            ChatRecord.create_time)
-
-    result = session.execute(stmt).all()
+    stmt = select(ChatRecord).where(
+        and_(ChatRecord.create_by == current_user.id, ChatRecord.chat_id == chart_id)
+    ).order_by(ChatRecord.create_time, ChatRecord.id)
+    result = session.execute(stmt).scalars().all()
+    latest_logs = {}
+    if not with_data:
+        record_ids = [record.id for record in result if record.id is not None]
+        latest_logs = _pick_latest_logs_by_record_ids(session, record_ids)
     record_list: list[ChatRecordResult] = []
     for row in result:
         if not with_data:
+            sql_log = latest_logs.get((row.id, OperationEnum.GENERATE_SQL))
+            chart_log = latest_logs.get((row.id, OperationEnum.GENERATE_CHART))
+            analysis_log = latest_logs.get((row.id, OperationEnum.ANALYSIS))
+            predict_log = latest_logs.get((row.id, OperationEnum.PREDICT_DATA))
             record_list.append(
-                ChatRecordResult(id=row.id, chat_id=row.chat_id, create_time=row.create_time,
-                                 finish_time=row.finish_time,
-                                 question=row.question, sql_answer=row.sql_answer, sql=row.sql,
-                                 chart_answer=row.chart_answer, chart=row.chart,
-                                 analysis=row.analysis, predict=row.predict,
-                                 datasource_select_answer=row.datasource_select_answer,
-                                 analysis_record_id=row.analysis_record_id, predict_record_id=row.predict_record_id,
-                                 recommended_question=row.recommended_question, first_chat=row.first_chat,
-                                 finish=row.finish, error=row.error,
-                                 sql_reasoning_content=row.sql_reasoning_content,
-                                 chart_reasoning_content=row.chart_reasoning_content,
-                                 analysis_reasoning_content=row.analysis_reasoning_content,
-                                 predict_reasoning_content=row.predict_reasoning_content,
-                                 ))
+                ChatRecordResult(
+                    id=row.id, chat_id=row.chat_id, create_time=row.create_time,
+                    finish_time=row.finish_time,
+                    question=row.question, sql_answer=row.sql_answer, sql=row.sql,
+                    chart_answer=row.chart_answer, chart=row.chart,
+                    analysis=row.analysis, predict=row.predict,
+                    datasource_select_answer=row.datasource_select_answer,
+                    analysis_record_id=row.analysis_record_id, predict_record_id=row.predict_record_id,
+                    recommended_question=row.recommended_question, first_chat=row.first_chat,
+                    finish=row.finish, error=row.error,
+                    sql_reasoning_content=sql_log.reasoning_content if sql_log else None,
+                    chart_reasoning_content=chart_log.reasoning_content if chart_log else None,
+                    analysis_reasoning_content=analysis_log.reasoning_content if analysis_log else None,
+                    predict_reasoning_content=predict_log.reasoning_content if predict_log else None,
+                )
+            )
         else:
             record_list.append(
-                ChatRecordResult(id=row.id, chat_id=row.chat_id, create_time=row.create_time,
-                                 finish_time=row.finish_time,
-                                 question=row.question, sql_answer=row.sql_answer, sql=row.sql,
-                                 chart_answer=row.chart_answer, chart=row.chart,
-                                 analysis=row.analysis, predict=row.predict,
-                                 datasource_select_answer=row.datasource_select_answer,
-                                 analysis_record_id=row.analysis_record_id, predict_record_id=row.predict_record_id,
-                                 recommended_question=row.recommended_question, first_chat=row.first_chat,
-                                 finish=row.finish, error=row.error, data=row.data, predict_data=row.predict_data))
+                ChatRecordResult(
+                    id=row.id, chat_id=row.chat_id, create_time=row.create_time,
+                    finish_time=row.finish_time,
+                    question=row.question, sql_answer=row.sql_answer, sql=row.sql,
+                    chart_answer=row.chart_answer, chart=row.chart,
+                    analysis=row.analysis, predict=row.predict,
+                    datasource_select_answer=row.datasource_select_answer,
+                    analysis_record_id=row.analysis_record_id, predict_record_id=row.predict_record_id,
+                    recommended_question=row.recommended_question, first_chat=row.first_chat,
+                    finish=row.finish, error=row.error, data=row.data, predict_data=row.predict_data
+                )
+            )
 
     result = list(map(format_record, record_list))
 
@@ -503,6 +509,95 @@ def end_log(session: SessionDep, log: ChatLog, full_message: list[dict], reasoni
     session.commit()
 
     return log
+
+
+def _normalize_trace_payload(payload: Any) -> Any:
+    if payload is None:
+        return None
+    try:
+        normalized = prepare_for_orjson(payload)
+        return orjson.loads(orjson.dumps(normalized))
+    except Exception:
+        return {"raw": str(payload)}
+
+
+def start_execution_trace(
+        session: SessionDep,
+        record_id: int,
+        chat_id: int,
+        create_by: int,
+        trace_group: str,
+        node_key: str,
+        node_name: str,
+        input_payload: Any = None,
+        extra_data: Any = None,
+) -> ChatExecutionTrace:
+    trace = ChatExecutionTrace(
+        record_id=record_id,
+        chat_id=chat_id,
+        create_by=create_by,
+        trace_group=trace_group,
+        node_key=node_key,
+        node_name=node_name,
+        status=ChatExecutionTraceStatus.RUNNING,
+        input_payload=_normalize_trace_payload(input_payload),
+        extra_data=_normalize_trace_payload(extra_data),
+        start_time=datetime.datetime.now(),
+    )
+    result = ChatExecutionTrace(**trace.model_dump())
+    session.add(trace)
+    session.flush()
+    session.refresh(trace)
+    result.id = trace.id
+    session.commit()
+    return result
+
+
+def end_execution_trace(
+        session: SessionDep,
+        trace: ChatExecutionTrace,
+        status: str = ChatExecutionTraceStatus.SUCCESS,
+        output_payload: Any = None,
+        error_message: str | None = None,
+        extra_data: Any = None,
+) -> ChatExecutionTrace:
+    finish_time = datetime.datetime.now()
+    duration_ms = None
+    if trace.start_time:
+        duration_ms = int((finish_time - trace.start_time).total_seconds() * 1000)
+    normalized_extra_data = _normalize_trace_payload(extra_data)
+    if isinstance(trace.extra_data, dict) and isinstance(normalized_extra_data, dict):
+        merged_extra_data = {**trace.extra_data, **normalized_extra_data}
+    else:
+        merged_extra_data = normalized_extra_data or trace.extra_data
+    stmt = update(ChatExecutionTrace).where(and_(ChatExecutionTrace.id == trace.id)).values(
+        status=status,
+        output_payload=_normalize_trace_payload(output_payload),
+        error_message=error_message,
+        extra_data=merged_extra_data,
+        finish_time=finish_time,
+        duration_ms=duration_ms
+    )
+    session.execute(stmt)
+    session.commit()
+    trace.status = status
+    trace.output_payload = _normalize_trace_payload(output_payload)
+    trace.error_message = error_message
+    trace.extra_data = merged_extra_data
+    trace.finish_time = finish_time
+    trace.duration_ms = duration_ms
+    return trace
+
+
+def list_execution_traces(session: SessionDep, record_id: int, current_user: CurrentUser) -> list[ChatExecutionTraceResult]:
+    conditions = [ChatExecutionTrace.record_id == record_id]
+    if not getattr(current_user, "isAdmin", False):
+        conditions.append(ChatExecutionTrace.create_by == current_user.id)
+    stmt = select(ChatExecutionTrace).where(and_(*conditions)).order_by(
+        ChatExecutionTrace.start_time, ChatExecutionTrace.id
+    )
+    result = session.execute(stmt).scalars().all()
+    return [ChatExecutionTraceResult(**trace.model_dump()) for trace in result]
 
 
 def save_sql_answer(session: SessionDep, record_id: int, answer: str, current_user: CurrentUser) -> ChatRecord:

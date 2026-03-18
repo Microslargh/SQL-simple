@@ -1,0 +1,562 @@
+[
+  {
+    "table_name": "demo_order",
+    "file_name": "demo_order.csv",
+    "row_count": 15,
+    "fields": [
+      {
+        "name": "order_id",
+        "type": "numeric",
+        "unique_count": 15,
+        "null_count": 0,
+        "is_id": true,
+        "sample_values": [
+          "1002",
+          "1007",
+          "1003",
+          "1009",
+          "1013"
+        ],
+        "top_values": [
+          {
+            "value": "1001",
+            "count": 1
+          },
+          {
+            "value": "1002",
+            "count": 1
+          },
+          {
+            "value": "1003",
+            "count": 1
+          },
+          {
+            "value": "1004",
+            "count": 1
+          },
+          {
+            "value": "1005",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "customer_name",
+        "type": "text",
+        "unique_count": 8,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "赵六",
+          "孙七",
+          "王五",
+          "李四",
+          "张三"
+        ],
+        "top_values": [
+          {
+            "value": "张三",
+            "count": 3
+          },
+          {
+            "value": "李四",
+            "count": 3
+          },
+          {
+            "value": "王五",
+            "count": 2
+          },
+          {
+            "value": "赵六",
+            "count": 2
+          },
+          {
+            "value": "孙七",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "name": "product_category",
+        "type": "text",
+        "unique_count": 4,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "服装鞋帽",
+          "食品饮料",
+          "家居用品",
+          "电子产品"
+        ],
+        "top_values": [
+          {
+            "value": "电子产品",
+            "count": 6
+          },
+          {
+            "value": "家居用品",
+            "count": 3
+          },
+          {
+            "value": "服装鞋帽",
+            "count": 3
+          },
+          {
+            "value": "食品饮料",
+            "count": 3
+          }
+        ]
+      },
+      {
+        "name": "order_date",
+        "type": "date",
+        "unique_count": 15,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "2024-03-05",
+          "2024-05-20",
+          "2024-02-10",
+          "2024-01-17",
+          "2024-03-01"
+        ],
+        "top_values": [
+          {
+            "value": "2024-01-15",
+            "count": 1
+          },
+          {
+            "value": "2024-01-16",
+            "count": 1
+          },
+          {
+            "value": "2024-01-17",
+            "count": 1
+          },
+          {
+            "value": "2024-02-01",
+            "count": 1
+          },
+          {
+            "value": "2024-02-03",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "amount",
+        "type": "numeric",
+        "unique_count": 15,
+        "null_count": 0,
+        "is_id": true,
+        "sample_values": [
+          "1599.00",
+          "1299.00",
+          "699.00",
+          "5499.00",
+          "3999.00"
+        ],
+        "top_values": [
+          {
+            "value": "2999.00",
+            "count": 1
+          },
+          {
+            "value": "459.50",
+            "count": 1
+          },
+          {
+            "value": "8999.00",
+            "count": 1
+          },
+          {
+            "value": "299.00",
+            "count": 1
+          },
+          {
+            "value": "156.80",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "quantity",
+        "type": "numeric",
+        "unique_count": 7,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "5",
+          "1",
+          "6",
+          "3",
+          "4"
+        ],
+        "top_values": [
+          {
+            "value": "1",
+            "count": 7
+          },
+          {
+            "value": "2",
+            "count": 3
+          },
+          {
+            "value": "3",
+            "count": 1
+          },
+          {
+            "value": "5",
+            "count": 1
+          },
+          {
+            "value": "4",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "unique_count": 4,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "已发货",
+          "待支付",
+          "已取消",
+          "已完成"
+        ],
+        "top_values": [
+          {
+            "value": "已完成",
+            "count": 11
+          },
+          {
+            "value": "已发货",
+            "count": 2
+          },
+          {
+            "value": "已取消",
+            "count": 1
+          },
+          {
+            "value": "待支付",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "region",
+        "type": "text",
+        "unique_count": 5,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "西北",
+          "西南",
+          "华南",
+          "华北",
+          "华东"
+        ],
+        "top_values": [
+          {
+            "value": "华东",
+            "count": 6
+          },
+          {
+            "value": "华北",
+            "count": 3
+          },
+          {
+            "value": "华南",
+            "count": 3
+          },
+          {
+            "value": "西北",
+            "count": 2
+          },
+          {
+            "value": "西南",
+            "count": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "table_name": "example_orders",
+    "file_name": "example_orders.csv",
+    "row_count": 15,
+    "fields": [
+      {
+        "name": "order_id",
+        "type": "numeric",
+        "unique_count": 15,
+        "null_count": 0,
+        "is_id": true,
+        "sample_values": [
+          "1002",
+          "1007",
+          "1003",
+          "1009",
+          "1013"
+        ],
+        "top_values": [
+          {
+            "value": "1001",
+            "count": 1
+          },
+          {
+            "value": "1002",
+            "count": 1
+          },
+          {
+            "value": "1003",
+            "count": 1
+          },
+          {
+            "value": "1004",
+            "count": 1
+          },
+          {
+            "value": "1005",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "customer_name",
+        "type": "text",
+        "unique_count": 10,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "赵六",
+          "孙八",
+          "钱七",
+          "王五",
+          "李四"
+        ],
+        "top_values": [
+          {
+            "value": "张三",
+            "count": 2
+          },
+          {
+            "value": "李四",
+            "count": 2
+          },
+          {
+            "value": "王五",
+            "count": 2
+          },
+          {
+            "value": "赵六",
+            "count": 2
+          },
+          {
+            "value": "钱七",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "name": "product_category",
+        "type": "text",
+        "unique_count": 4,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "食品",
+          "服装",
+          "家居",
+          "电子产品"
+        ],
+        "top_values": [
+          {
+            "value": "电子产品",
+            "count": 5
+          },
+          {
+            "value": "服装",
+            "count": 4
+          },
+          {
+            "value": "食品",
+            "count": 3
+          },
+          {
+            "value": "家居",
+            "count": 3
+          }
+        ]
+      },
+      {
+        "name": "order_date",
+        "type": "date",
+        "unique_count": 15,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "2025-02-10",
+          "2025-02-15",
+          "2025-03-15",
+          "2025-04-10",
+          "2025-04-01"
+        ],
+        "top_values": [
+          {
+            "value": "2025-01-15",
+            "count": 1
+          },
+          {
+            "value": "2025-01-16",
+            "count": 1
+          },
+          {
+            "value": "2025-01-17",
+            "count": 1
+          },
+          {
+            "value": "2025-01-18",
+            "count": 1
+          },
+          {
+            "value": "2025-02-01",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "amount",
+        "type": "numeric",
+        "unique_count": 15,
+        "null_count": 0,
+        "is_id": true,
+        "sample_values": [
+          "1299.00",
+          "3500.00",
+          "399.00",
+          "5999.00",
+          "1200.00"
+        ],
+        "top_values": [
+          {
+            "value": "2999.00",
+            "count": 1
+          },
+          {
+            "value": "399.00",
+            "count": 1
+          },
+          {
+            "value": "89.50",
+            "count": 1
+          },
+          {
+            "value": "5999.00",
+            "count": 1
+          },
+          {
+            "value": "1200.00",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "quantity",
+        "type": "numeric",
+        "unique_count": 6,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "5",
+          "1",
+          "8",
+          "3",
+          "10"
+        ],
+        "top_values": [
+          {
+            "value": "1",
+            "count": 6
+          },
+          {
+            "value": "2",
+            "count": 4
+          },
+          {
+            "value": "3",
+            "count": 2
+          },
+          {
+            "value": "5",
+            "count": 1
+          },
+          {
+            "value": "10",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "unique_count": 3,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "配送中",
+          "已取消",
+          "已完成"
+        ],
+        "top_values": [
+          {
+            "value": "已完成",
+            "count": 10
+          },
+          {
+            "value": "配送中",
+            "count": 3
+          },
+          {
+            "value": "已取消",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "name": "region",
+        "type": "text",
+        "unique_count": 4,
+        "null_count": 0,
+        "is_id": false,
+        "sample_values": [
+          "华西",
+          "华南",
+          "华东",
+          "华北"
+        ],
+        "top_values": [
+          {
+            "value": "华东",
+            "count": 5
+          },
+          {
+            "value": "华北",
+            "count": 4
+          },
+          {
+            "value": "华南",
+            "count": 3
+          },
+          {
+            "value": "华西",
+            "count": 3
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -8,6 +8,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
 from typing import Any, List, Optional, Union, Dict, Iterator
+from uuid import uuid4
 
 import numpy as np
 import orjson
@@ -28,9 +29,9 @@ from apps.chat.curd.chat import save_question, save_sql_answer, save_sql, \
     save_select_datasource_answer, save_recommend_question_answer, \
     get_old_questions, save_analysis_predict_record, rename_chat, get_chart_config, \
     get_chat_chart_data, list_generate_sql_logs, list_generate_chart_logs, start_log, end_log, \
-    get_last_execute_sql_error
+    get_last_execute_sql_error, start_execution_trace, end_execution_trace
 from apps.chat.models.chat_model import ChatQuestion, ChatRecord, Chat, RenameChat, ChatLog, OperationEnum, \
-    ChatFinishStep
+    ChatFinishStep, ChatExecutionTrace, ChatExecutionTraceStatus
 from apps.chat.context import ContextStateManager
 from apps.chat.context.question_enhancer import is_any_follow_up
 from apps.chat.utils.table_selection_rule import generate_table_selection_rule
@@ -126,6 +127,8 @@ class LLMService:
     generate_chart_logs: List[ChatLog] = []
 
     current_logs: dict[OperationEnum, ChatLog] = {}
+    trace_group: str
+    _pipeline_trace: Optional[ChatExecutionTrace] = None
 
     chunk_list: List[str] = []
     future: Future
@@ -138,6 +141,8 @@ class LLMService:
                  current_assistant: "CurrentAssistant | None" = None, no_reasoning: bool = False,
                  embedding: bool = False, config: LLMConfig = None):
         self.chunk_list = []
+        self.trace_group = uuid4().hex
+        self._pipeline_trace = None
         # engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
         # session_maker = sessionmaker(bind=engine)
         # self.session = session_maker()
@@ -529,6 +534,19 @@ class LLMService:
 
     def init_record(self) -> ChatRecord:
         self.record = save_question(session=self.session, current_user=self.current_user, question=self.chat_question)
+        self._trace_step(
+            node_key="question_received",
+            node_name="接收问题",
+            input_payload={
+                "question": self.chat_question.question,
+                "chat_id": self.chat_question.chat_id,
+                "datasource": self.chat_question.datasource if hasattr(self.chat_question, "datasource") else None,
+            },
+            output_payload={
+                "record_id": self.record.id,
+                "chat_id": self.record.chat_id,
+            }
+        )
         return self.record
 
     def get_record(self):
@@ -536,6 +554,65 @@ class LLMService:
 
     def set_record(self, record: ChatRecord):
         self.record = record
+
+    @staticmethod
+    def _serialize_messages_for_trace(messages: List[Union[BaseMessage, dict[str, Any]]]) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                serialized.append({
+                    "type": msg.get("type"),
+                    "content": msg.get("content"),
+                })
+                continue
+            serialized.append({
+                "type": getattr(msg, "type", msg.__class__.__name__),
+                "content": getattr(msg, "content", ""),
+            })
+        return serialized
+
+    def _trace_start(self, node_key: str, node_name: str, input_payload: Any = None,
+                     extra_data: Any = None) -> Optional[ChatExecutionTrace]:
+        if not getattr(self, "record", None) or not getattr(self.record, "id", None):
+            return None
+        try:
+            return start_execution_trace(
+                session=self.session,
+                record_id=self.record.id,
+                chat_id=self.record.chat_id,
+                create_by=self.current_user.id,
+                trace_group=self.trace_group,
+                node_key=node_key,
+                node_name=node_name,
+                input_payload=input_payload,
+                extra_data=extra_data,
+            )
+        except Exception as exc:
+            _async_log_util.debug(f"[执行轨迹] start trace 失败 {node_key}: {exc}")
+            return None
+
+    def _trace_end(self, trace: Optional[ChatExecutionTrace], status: str = ChatExecutionTraceStatus.SUCCESS,
+                   output_payload: Any = None, error_message: str | None = None,
+                   extra_data: Any = None) -> None:
+        if trace is None:
+            return
+        try:
+            end_execution_trace(
+                session=self.session,
+                trace=trace,
+                status=status,
+                output_payload=output_payload,
+                error_message=error_message,
+                extra_data=extra_data,
+            )
+        except Exception as exc:
+            _async_log_util.debug(f"[执行轨迹] end trace 失败 {getattr(trace, 'node_key', '')}: {exc}")
+
+    def _trace_step(self, node_key: str, node_name: str, input_payload: Any = None, output_payload: Any = None,
+                    status: str = ChatExecutionTraceStatus.SUCCESS, error_message: str | None = None,
+                    extra_data: Any = None) -> None:
+        trace = self._trace_start(node_key=node_key, node_name=node_name, input_payload=input_payload, extra_data=extra_data)
+        self._trace_end(trace, status=status, output_payload=output_payload, error_message=error_message)
 
     def get_fields_from_chart(self):
         chart_info = get_chart_config(self.session, self.record.id, self.current_user)
@@ -622,6 +699,14 @@ class LLMService:
 
 
     def generate_analysis(self):
+        trace = self._trace_start(
+            node_key="analysis_generation",
+            node_name="分析生成",
+            input_payload={
+                "question": self.chat_question.question,
+                "record_id": self.record.id if self.record else None,
+            }
+        )
         # 优先从图表配置获取字段（图表已在分析之前生成）
         try:
             fields = self.get_fields_from_chart()
@@ -801,8 +886,26 @@ class LLMService:
         self.record = save_analysis_answer(session=self.session, record_id=self.record.id,
                                            current_user=self.current_user,
                                            answer=orjson.dumps({'content': full_analysis_text}).decode())
+        self._trace_end(
+            trace,
+            output_payload={
+                "analysis_text": full_analysis_text,
+                "reasoning_content": full_thinking_text,
+                "token_usage": token_usage,
+                "fields": fields,
+                "data_total_rows": self.chat_question.data_total_rows,
+            }
+        )
 
     def generate_predict(self):
+        trace = self._trace_start(
+            node_key="predict_generation",
+            node_name="预测生成",
+            input_payload={
+                "question": self.chat_question.question,
+                "record_id": self.record.id if self.record else None,
+            }
+        )
         fields = self.get_fields_from_chart()
         self.chat_question.fields = orjson.dumps(fields).decode()
         data = get_chat_chart_data(self.session, self.record.id, self.current_user)
@@ -851,6 +954,15 @@ class LLMService:
                                                                     for msg in predict_msg],
                                                                 reasoning_content=full_thinking_text,
                                                                 token_usage=token_usage)
+        self._trace_end(
+            trace,
+            output_payload={
+                "predict_text": full_predict_text,
+                "reasoning_content": full_thinking_text,
+                "token_usage": token_usage,
+                "fields": fields,
+            }
+        )
 
     @staticmethod
     def _parse_recommended_questions(content: str) -> List[str]:
@@ -1172,6 +1284,15 @@ class LLMService:
 
         full_thinking_text = ''
         full_text = ''
+        trace = self._trace_start(
+            node_key="datasource_selection",
+            node_name="数据源选择",
+            input_payload={
+                "question": self.chat_question.question,
+                "candidate_count": len(_ds_list),
+                "candidate_ids": [item.get("id") for item in _ds_list if isinstance(item, dict)],
+            }
+        )
         if not ignore_auto_select:
             if settings.TABLE_EMBEDDING_ENABLED:
                 ds = get_ds_embedding(self.session, self.current_user, _ds_list, self.out_ds_instance,
@@ -1290,11 +1411,34 @@ class LLMService:
             self.init_messages()
 
         if _error:
+            self._trace_end(
+                trace,
+                status=ChatExecutionTraceStatus.ERROR,
+                error_message=str(_error),
+                output_payload={"selected_datasource": _datasource, "engine_type": _engine_type},
+            )
             raise _error
+        self._trace_end(
+            trace,
+            output_payload={
+                "selected_datasource": _datasource,
+                "engine_type": _engine_type,
+                "response_text": full_text,
+                "reasoning_content": full_thinking_text,
+            }
+        )
 
     def generate_sql(self):
         # 检查表选择规则：如果当前暂无数据或查询时间超出数据范围，直接返回友好提示（含「当前数据库仅有X年X月及以前的数据」等）
         if self.table_selection_info and self.table_selection_info.get("status") == "no_data":
+            trace = self._trace_start(
+                node_key="sql_generation",
+                node_name="SQL生成",
+                input_payload={
+                    "messages": [{"type": "human", "content": self.chat_question.question}],
+                    "table_selection_info": self.table_selection_info,
+                }
+            )
             hint_message = self.table_selection_info.get("message") or "当前暂无想要查询的数据"
             error_msg = orjson.dumps({"success": False, "message": hint_message}).decode()
             # 前端用 reasoning_content 拼接到 sql_answer 展示；content 保留 JSON 供协议判断
@@ -1316,11 +1460,25 @@ class LLMService:
             self.record = save_sql_answer(session=self.session, record_id=self.record.id,
                                           current_user=self.current_user,
                                           answer=orjson.dumps({'content': error_msg}).decode())
+            self._trace_end(
+                trace,
+                output_payload={
+                    "result": error_msg,
+                    "reasoning_content": hint_message,
+                }
+            )
             return
         
         # append current question（法人户数且未指定时间时 current_time 取自产权表压减=是的最新创建时间）
         self.sql_message.append(HumanMessage(
             self.chat_question.sql_user_question(current_time=self._get_effective_current_time())))
+        trace = self._trace_start(
+            node_key="sql_generation",
+            node_name="SQL生成",
+            input_payload={
+                "messages": self._serialize_messages_for_trace(self.sql_message),
+            }
+        )
 
         self.current_logs[OperationEnum.GENERATE_SQL] = start_log(session=self.session,
                                                                   ai_modal_id=self.chat_question.ai_modal_id,
@@ -1352,6 +1510,14 @@ class LLMService:
         self.record = save_sql_answer(session=self.session, record_id=self.record.id,
                                       answer=orjson.dumps({'content': full_sql_text}).decode(),
                                       current_user=self.current_user)
+        self._trace_end(
+            trace,
+            output_payload={
+                "response_text": full_sql_text,
+                "reasoning_content": full_thinking_text,
+                "token_usage": token_usage,
+            }
+        )
 
 
     def double_check_straight_sql_info(self, matched_id, infos, training_data):
@@ -1367,6 +1533,16 @@ class LLMService:
         sql_info = matched_data["sql-info"]
         user_sql_info = json.dumps(infos)
         user_question = (self.chat_question.question or "").strip()
+        trace = self._trace_start(
+            node_key="quick_template_double_check",
+            node_name="快速模板二次校验",
+            input_payload={
+                "matched_id": matched_id,
+                "template_question": template_question,
+                "user_question": user_question,
+                "infos": infos,
+            }
+        )
 
         # 实体类型预检：地区 vs 公司/产业互斥，避免海南省误用集团各产业模板
         user_type = infer_entity_type(user_question)
@@ -1375,6 +1551,10 @@ class LLMService:
             _async_log_util.info(
                 f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                 f"实体类型冲突: 用户={user_type}, 模板={template_type}"
+            )
+            self._trace_end(
+                trace,
+                output_payload={"matched": False, "reason": "entity_type_conflict"},
             )
             return False
 
@@ -1385,6 +1565,10 @@ class LLMService:
                 _async_log_util.info(
                     f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                     f"模板含「{kw}」而用户问题未提及，直接判不匹配"
+                )
+                self._trace_end(
+                    trace,
+                    output_payload={"matched": False, "reason": f"scope_keyword_missing:{kw}"},
                 )
                 return False
 
@@ -1397,6 +1581,10 @@ class LLMService:
                 f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                 f"并表口径不一致: 用户含并表={user_has_consolidated}, 模板含并表={template_has_consolidated}"
             )
+            self._trace_end(
+                trace,
+                output_payload={"matched": False, "reason": "consolidated_mismatch"},
+            )
             return False
 
         # 存续口径预检：模板含「存续」而用户未提、或用户含「存续」而模板未提，均不匹配（SQL 筛选不同）
@@ -1404,6 +1592,10 @@ class LLMService:
             _async_log_util.info(
                 f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                 f"存续口径不一致: 模板含存续={'存续' in template_question}, 用户含存续={'存续' in user_question}"
+            )
+            self._trace_end(
+                trace,
+                output_payload={"matched": False, "reason": "survival_scope_mismatch"},
             )
             return False
 
@@ -1415,6 +1607,10 @@ class LLMService:
             _async_log_util.info(
                 f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                 f"用户要明细/列表而模板为汇总: 用户含明细类词=True, 模板含=False"
+            )
+            self._trace_end(
+                trace,
+                output_payload={"matched": False, "reason": "detail_mismatch"},
             )
             return False
 
@@ -1459,6 +1655,10 @@ class LLMService:
                 f"[快速模板匹配] 二次校验无法解析True/False - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                 f"可能模型未按「最后一行只返回True或False」输出，模型完整回复:\n{content_str[:800]}"
             )
+            self._trace_end(
+                trace,
+                output_payload={"matched": False, "reason": "cannot_parse_boolean", "response_text": content_str[:800]},
+            )
             return False
 
         # 若模型同时输出 True 和 False（格式混乱），根据推理内容判断：推理含「一致」「匹配」「可以使用」等则取 True
@@ -1469,11 +1669,19 @@ class LLMService:
                     f"[快速模板匹配] 二次校验通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
                     f"模型同时输出True/False，推理含匹配表述，取True"
                 )
+                self._trace_end(
+                    trace,
+                    output_payload={"matched": True, "response_text": content_str[:800], "decision_mode": "reasoning_positive"},
+                )
                 return True
             # 推理含否定表述则取 False
             if any(kw in reasoning_text for kw in ("不一致", "不匹配", "不符合", "不满足", "不能使用")):
                 _async_log_util.info(
                     f"[快速模板匹配] 二次校验返回False - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 模型推理含不匹配表述"
+                )
+                self._trace_end(
+                    trace,
+                    output_payload={"matched": False, "response_text": content_str[:800], "decision_mode": "reasoning_negative"},
                 )
                 return False
             # 无法从推理判断时，取最后一次出现（保持原逻辑）
@@ -1483,9 +1691,17 @@ class LLMService:
 
         if result:
             _async_log_util.info(f"[快速模板匹配] 二次校验通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 模型返回: True")
+            self._trace_end(
+                trace,
+                output_payload={"matched": True, "response_text": content_str[:800]},
+            )
             return True
         _async_log_util.info(
             f"[快速模板匹配] 二次校验返回False - 模板ID: {template_id}, 模板问题: {template_question[:80]}, 模型完整回复:\n{content_str[:500]}"
+        )
+        self._trace_end(
+            trace,
+            output_payload={"matched": False, "response_text": content_str[:800]},
         )
         return False
 
@@ -1493,6 +1709,13 @@ class LLMService:
     def generate_straight_sql_info(self):
         self.straight_messages.append(HumanMessage(
             self.chat_question.sql_user_question(current_time=self._get_effective_current_time())))
+        trace = self._trace_start(
+            node_key="quick_template_match",
+            node_name="快速模板匹配",
+            input_payload={
+                "messages": self._serialize_messages_for_trace(self.straight_messages),
+            }
+        )
 
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
@@ -1502,10 +1725,24 @@ class LLMService:
 
         token_usage = {}
         res = process_stream(self.llm.stream(self.straight_messages), token_usage)
+        full_text = ""
+        full_reasoning_text = ""
         for chunk in res:
+            if chunk.get('content'):
+                full_text += chunk.get('content')
+            if chunk.get('reasoning_content'):
+                full_reasoning_text += chunk.get('reasoning_content')
             yield chunk
         # 将token_usage存储到实例变量中，以便外部访问
         self.straight_sql_token_usage = token_usage
+        self._trace_end(
+            trace,
+            output_payload={
+                "response_text": full_text,
+                "reasoning_content": full_reasoning_text,
+                "token_usage": token_usage,
+            }
+        )
 
 
     @staticmethod
@@ -1861,6 +2098,14 @@ class LLMService:
     def generate_chart(self, chart_type: Optional[str] = ''):
         # append current question
         self.chart_message.append(HumanMessage(self.chat_question.chart_user_question(chart_type)))
+        trace = self._trace_start(
+            node_key="chart_generation",
+            node_name="图表生成",
+            input_payload={
+                "chart_type_hint": chart_type,
+                "messages": self._serialize_messages_for_trace(self.chart_message),
+            }
+        )
 
         self.current_logs[OperationEnum.GENERATE_CHART] = start_log(session=self.session,
                                                                     ai_modal_id=self.chat_question.ai_modal_id,
@@ -1894,6 +2139,14 @@ class LLMService:
                                                                       for msg in self.chart_message],
                                                                   reasoning_content=full_thinking_text,
                                                                   token_usage=token_usage)
+        self._trace_end(
+            trace,
+            output_payload={
+                "response_text": full_chart_text,
+                "reasoning_content": full_thinking_text,
+                "token_usage": token_usage,
+            }
+        )
 
     @staticmethod
     def check_sql(res: str) -> tuple[str, Optional[list]]:
@@ -2126,9 +2379,32 @@ class LLMService:
             _async_log_util.info(f"Executing SQL on ds_id {self.ds.id}: {sql}")
         else:
             _async_log_util.info(f"Executing SQL on ds_id {self.ds.id}")
+        trace = self._trace_start(
+            node_key="sql_execution",
+            node_name="SQL执行",
+            input_payload={
+                "datasource_id": self.ds.id if self.ds else None,
+                "sql": sql,
+            }
+        )
         try:
-            return exec_sql(ds=self.ds, sql=sql, origin_column=False)
+            result = exec_sql(ds=self.ds, sql=sql, origin_column=False)
+            self._trace_end(
+                trace,
+                output_payload={
+                    "fields": result.get("fields") if isinstance(result, dict) else None,
+                    "row_count": len(result.get("data") or []) if isinstance(result, dict) else None,
+                    "result_preview": (result.get("data") or [])[:5] if isinstance(result, dict) else None,
+                }
+            )
+            return result
         except Exception as e:
+            self._trace_end(
+                trace,
+                status=ChatExecutionTraceStatus.ERROR,
+                error_message=str(e),
+                output_payload={"error_type": e.__class__.__name__}
+            )
             if isinstance(e, ParseSQLResultError):
                 raise e
             else:
@@ -2173,6 +2449,18 @@ class LLMService:
         # 单请求内问题增强只执行一次，避免 LLM 被重复调用 3 次及“过度增强”
         self._question_enhanced = False
         self._context_prompt_cache = None  # 同请求内避免重复执行智能上下文分析与仲裁者
+        pipeline_status = ChatExecutionTraceStatus.SUCCESS
+        pipeline_error_message: str | None = None
+        self._pipeline_trace = self._trace_start(
+            node_key="question_pipeline",
+            node_name="问数主流程",
+            input_payload={
+                "question": self.chat_question.question,
+                "chat_id": self.chat_question.chat_id,
+                "record_id": self.record.id if self.record else None,
+                "finish_step": finish_step.name if finish_step else None,
+            }
+        )
         try:
             training_data = []
             if self.ds:
@@ -2194,6 +2482,18 @@ class LLMService:
                         self._question_enhanced = True
                         if enhanced.strip() != (original_q or '').strip():
                             _async_log_util.info(f"[问题增强-Step1] 检索前补全 - 原始: {original_q[:50]}, 增强后: {self.chat_question.question[:80]}")
+                    self._trace_step(
+                        node_key="question_enhancement",
+                        node_name="问题增强",
+                        input_payload={
+                            "original_question": original_q,
+                            "history_log_count": len(self.generate_sql_logs),
+                        },
+                        output_payload={
+                            "enhanced_question": self.chat_question.question,
+                            "question_changed": (self.chat_question.question or "").strip() != (original_q or "").strip(),
+                        }
+                    )
 
                 # 步骤2：术语检索（使用增强后问题）
                 if in_chat:
@@ -2209,6 +2509,21 @@ class LLMService:
                 terminology_template, terminology_data = get_terminology_template_with_data(
                     self.session, terminology_query, oid, ds_id)
                 self.chat_question.terminologies = terminology_template
+                self._trace_step(
+                    node_key="terminology_retrieval",
+                    node_name="术语检索",
+                    input_payload={"query": terminology_query},
+                    output_payload={
+                        "count": len(terminology_data),
+                        "items": [
+                            {
+                                "words": t.get("words", []) if isinstance(t, dict) else [],
+                                "description": t.get("description", "") if isinstance(t, dict) else "",
+                            }
+                            for t in terminology_data[:5]
+                        ],
+                    }
+                )
                 
                 if in_chat:
                     # terminology_data 是字典列表，每个字典包含 {'words': [], 'description': ...}
@@ -2273,6 +2588,16 @@ class LLMService:
                     for t in training_data[:10]:
                         tid, tq = t.get('id', 'unknown'), (t.get('question') or '')[:120]
                         _async_log_util.info(f"[快速模板匹配] 数据训练检索 - 模板ID: {tid}, 模板问题: {tq}")
+                self._trace_step(
+                    node_key="training_retrieval",
+                    node_name="训练数据检索",
+                    input_payload={"query": training_query},
+                    output_payload={
+                        "count": len(training_data),
+                        "template_ids": [t.get("id") for t in training_data[:10]],
+                        "questions": [t.get("question", "") for t in training_data[:5]],
+                    }
+                )
                 
                 if in_chat:
                     yield 'data:' + orjson.dumps({
@@ -2294,9 +2619,29 @@ class LLMService:
                     _async_log_util.info(f"[自定义提示词] 获取自定义提示词完成，类型: GENERATE_SQL, 长度: {custom_prompt_length} 字符")
                 else:
                     _async_log_util.info(f"[自定义提示词] 未获取自定义提示词 (许可证有效: {SQLBotLicenseUtil.valid()}, find_custom_prompts可用: {find_custom_prompts is not None})")
+                self._trace_step(
+                    node_key="custom_prompt_load",
+                    node_name="自定义提示词加载",
+                    output_payload={
+                        "loaded": bool(self.chat_question.custom_prompt),
+                        "length": len(self.chat_question.custom_prompt or ""),
+                    }
+                )
 
             self.init_messages()
             self.init_straight_messages()
+            self._trace_step(
+                node_key="prompt_build",
+                node_name="Prompt构建",
+                output_payload={
+                    "sql_message_count": len(self.sql_message),
+                    "straight_message_count": len(self.straight_messages),
+                    "chart_message_count": len(self.chart_message),
+                    "enhanced_question": self.chat_question.question,
+                    "context_prompt_cached": bool(getattr(self, "_context_prompt_cache", None)),
+                    "table_selection_info": self.table_selection_info,
+                }
+            )
 
             # return id
             if in_chat:
@@ -2393,8 +2738,27 @@ class LLMService:
                                             _async_log_util.info(f"[表结构获取] 追问补全：已合并上一轮涉及表的字段定义，表: {missing[:10]}")
                         except Exception as e:
                             _async_log_util.debug(f"[表结构获取] 追问补全表结构失败: {e}")
+                self._trace_step(
+                    node_key="schema_retrieval",
+                    node_name="表结构获取",
+                    output_payload={
+                        "datasource_id": self.ds.id if self.ds else None,
+                        "schema_length": len(self.chat_question.db_schema or ""),
+                        "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
+                    }
+                )
             else:
                 self.validate_history_ds()
+                self._trace_step(
+                    node_key="schema_retrieval",
+                    node_name="表结构获取",
+                    output_payload={
+                        "datasource_id": self.ds.id if self.ds else None,
+                        "schema_length": len(self.chat_question.db_schema or ""),
+                        "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
+                        "source": "preloaded",
+                    }
+                )
 
             # check connection
             connected = check_connection(ds=self.ds, trans=None)
@@ -2471,6 +2835,16 @@ class LLMService:
                         f"[快速模板匹配] 二次校验未通过，中断快速模板，使用正常SQL生成流程 - 模板ID: {matched_id}, 模板问题: {tq_for_log}"
                     )
                     status = False
+            self._trace_step(
+                node_key="quick_template_result",
+                node_name="快速模板结果",
+                output_payload={
+                    "matched": status,
+                    "matched_id": matched_id,
+                    "infos": infos,
+                    "double_check_ok": double_check_ok,
+                }
+            )
             
             chart_type = ""
             if status:
@@ -2845,6 +3219,7 @@ class LLMService:
 
         except Exception as e:
             _async_log_util.exception("LLM task failed")
+            pipeline_status = ChatExecutionTraceStatus.ERROR
             error_msg: str
             if isinstance(e, SingleMessageError):
                 error_msg = str(e)
@@ -2856,6 +3231,7 @@ class LLMService:
                     {'message': 'Execute SQL Failed', 'traceback': str(e), 'type': 'exec-sql-err'}).decode()
             else:
                 error_msg = orjson.dumps({'message': str(e), 'traceback': traceback.format_exc(limit=1)}).decode()
+            pipeline_error_message = error_msg
             self.save_error(message=error_msg)
             if in_chat:
                 # 标记当前进行中的步骤为错误状态
@@ -2875,6 +3251,17 @@ class LLMService:
                     json_result['message'] = error_msg
                     yield json_result
         finally:
+            self._trace_end(
+                self._pipeline_trace,
+                status=pipeline_status,
+                error_message=pipeline_error_message,
+                output_payload={
+                    "record_id": self.record.id if self.record else None,
+                    "chat_id": self.record.chat_id if self.record else None,
+                    "sql_saved": bool(getattr(self.record, "sql_answer", None)) if getattr(self, "record", None) else False,
+                    "finish_step": finish_step.name if finish_step else None,
+                }
+            )
             self.finish()
 
     def run_recommend_questions_task_async(self):

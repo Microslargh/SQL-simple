@@ -154,7 +154,13 @@ export class Table extends BaseChart {
       return true
     }
 
-    // 唯一值数量在 2~20 之间，多为编码分类（0/1、1/2/3/4 等），不汇总
+    // 列名包含金额/税费/收入等，视为指标列，应参与汇总
+    const metricKeywords = ['税费', '金额', '亿元', '万元', '收入', '成本', '利润', '资产', '负债']
+    if (metricKeywords.some(kw => colName.includes(kw))) {
+      return false
+    }
+
+    // 唯一值数量在 2~15 之间，多为编码分类（0/1、1/2/3/4 等），不汇总
     if (uniqueCount >= 2 && uniqueCount <= 15) {
       return true
     }

@@ -204,6 +204,16 @@ export const routes = [
         },
       },
       {
+        path: 'execution-trace',
+        name: 'execution-trace',
+        component: () => import('@/views/system/executionTrace/index.vue'),
+        meta: {
+          title: '执行轨迹',
+          iconActive: 'chat',
+          iconDeActive: 'noChat',
+        },
+      },
+      {
         path: 'model',
         name: 'model',
         component: Model,

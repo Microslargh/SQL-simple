@@ -63,6 +63,7 @@ from apps.template.question_enhance.generator import get_question_enhance_templa
 from apps.chat.utils.entity_type_filter import filter_training_data_by_entity_type, infer_entity_type, ENTITY_REGION, ENTITY_COMPANY_INDUSTRY
 from apps.chat.utils.implicit_param_extract import extract_implicit_replacements, apply_implicit_replacements
 from apps.chat.utils.business_rules import apply_business_rules
+from apps.chat.utils.sql_generation_audit_rules import collect_sql_generation_audit_prompt
 from common.core.config import settings
 from common.core.db import engine
 from common.core.deps import CurrentAssistant, CurrentUser
@@ -210,6 +211,9 @@ class LLMService:
         else:
             self.chat_question.error_msg = ''
 
+        # 法人户数 cqs 表：SQL 中时间批次被修正为库内最新时，写入分析提示
+        self._cqs_snapshot_time_notice: Optional[str] = None
+
     @classmethod
     async def create(cls, *args, **kwargs):
         config: LLMConfig = await get_default_config()
@@ -271,41 +275,53 @@ class LLMService:
 
     def _get_effective_current_time(self) -> str:
         """获取用于 prompt 的 current_time。
-        若回答该问题须用到 cqs 表且问题没有明确指定时间时，则从数据源取 create_date 最新值，
-        不适用系统时间（因数据更新滞后于实际时间约一个月）；否则使用系统当前时间。
+        cqs 表且问题未明确指定时间时：压减=是 口径下以 **MAX(version_code)** 对应年月为业务最新快照
+        （create_date 易错，不再优先使用）；否则使用系统时间。
         """
         default_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not self.ds:
             return default_time
-        # 若 schema 中不含 cqs 表，说明该问题不涉及法人户数/企业查询，使用系统时间
         schema = (self.chat_question.db_schema or '')
         if 'dws_cqs' not in schema:
             return default_time
-        # 问题中已包含明确时间则用系统时间
         question = (self.chat_question.question or '').strip()
         time_keywords = ['时间', '日期', '月份', '年份', '年', '月', '日', '去年', '今年', '前年']
         if any(kw in question for kw in time_keywords):
             return default_time
-        # 法人户数视图：is_exit_press_reduce=是 时取 create_date 最新值（即当前表支持查询的最新时间）
         try:
-            sql = (
-                "SELECT MAX(create_date) AS latest "
-                "FROM default.dws_cqs_enterprise_query_view_full "
+            sql_vc = (
+                "SELECT MAX(version_code) AS vc FROM default.dws_cqs_enterprise_query_view_full "
                 "WHERE is_exit_press_reduce = '是'"
             )
-            result = exec_sql(ds=self.ds, sql=sql)
+            result = exec_sql(ds=self.ds, sql=sql_vc)
+            row = (result or {}).get('data') or []
+            if row:
+                r0 = row[0] if isinstance(row[0], dict) else {}
+                raw = r0.get('vc') or r0.get('VC') if isinstance(r0, dict) else None
+                if raw is None and isinstance(r0, dict):
+                    raw = next((v for k, v in r0.items() if v is not None), None)
+                if raw is not None:
+                    s = str(raw).strip()
+                    if s.isdigit() and len(s) >= 6:
+                        effective = f'{s[:4]}-{s[4:6]}-01 00:00:00'
+                        _async_log_util.info(
+                            f"[current_time] cqs 压减口径，使用 MAX(version_code)={s[:6]} 对应时间: {effective}"
+                        )
+                        return effective
+            sql_dt = (
+                "SELECT MAX(create_date) AS latest FROM default.dws_cqs_enterprise_query_view_full "
+                "WHERE is_exit_press_reduce = '是'"
+            )
+            result = exec_sql(ds=self.ds, sql=sql_dt)
             if not result or not result.get('data') or not result['data'][0]:
-                _async_log_util.info(f"[current_time] cqs 视图无结果，使用系统时间: {default_time}")
+                _async_log_util.info(f"[current_time] cqs 无 version_code/create_date，使用系统时间: {default_time}")
                 return default_time
             row = result['data'][0]
-            # 兼容不同库返回的列名（latest / Latest / max(create_date) 等）
-            raw = row.get('latest') or row.get('Latest')
+            raw = row.get('latest') or row.get('Latest') if isinstance(row, dict) else None
             if raw is None and isinstance(row, dict):
                 raw = next((v for k, v in row.items() if v is not None), None)
             if raw is None:
-                _async_log_util.info(f"[current_time] cqs 视图结果无有效值，使用系统时间: {default_time}")
                 return default_time
-            # 统一格式为 YYYY-MM-DD HH:MM:SS
             if isinstance(raw, datetime):
                 effective = raw.strftime('%Y-%m-%d %H:%M:%S')
             else:
@@ -316,16 +332,210 @@ class LLMService:
                     effective = f'{s[:10]} 00:00:00' if len(s) <= 10 else s[:19]
                 else:
                     effective = default_time
-            _async_log_util.info(f"[current_time] cqs 表场景，使用视图最新 create_date 作为当前时间: {effective}")
+            _async_log_util.info(f"[current_time] cqs 回退 MAX(create_date): {effective}")
             return effective
         except Exception as e:
-            _async_log_util.info(f"[current_time] 从 cqs 视图取最新 create_date 失败，使用系统时间: {default_time}, 错误: {e}")
+            _async_log_util.info(f"[current_time] cqs 取最新快照失败，使用系统时间: {default_time}, 错误: {e}")
             return default_time
+
+    def _parse_row_datetime_to_yyyymm(self, raw: Any) -> Optional[int]:
+        if raw is None:
+            return None
+        if isinstance(raw, datetime):
+            return raw.year * 100 + raw.month
+        s = str(raw).strip()
+        if len(s) >= 7 and s[4] == "-":
+            try:
+                y, mo = int(s[:4]), int(s[5:7])
+                if 1 <= mo <= 12 and 2000 <= y <= 2099:
+                    return y * 100 + mo
+            except ValueError:
+                pass
+        if len(s) >= 6 and s[:6].isdigit():
+            v = int(s[:6])
+            if 200001 <= v <= 209912:
+                return v
+        return None
+
+    def _fetch_cqs_max_snapshot_yyyymm(self) -> Optional[int]:
+        """压减=是口径下以 MAX(version_code) 的 YYYYMM 为最新快照；version_code 不可用时回退 MAX(create_date)。"""
+        if not self.ds:
+            return None
+        if getattr(self, "_cqs_snapshot_yyyymm_done", False):
+            return getattr(self, "_cqs_snapshot_yyyymm_val", None)
+        from_version: Optional[int] = None
+        from_create: Optional[int] = None
+        try:
+            sql_vc = (
+                "SELECT MAX(version_code) AS vc FROM default.dws_cqs_enterprise_query_view_full "
+                "WHERE is_exit_press_reduce = '是'"
+            )
+            result = exec_sql(ds=self.ds, sql=sql_vc)
+            row = (result or {}).get("data") or []
+            if row:
+                r0 = row[0] if isinstance(row[0], dict) else {}
+                raw = r0.get("vc") or r0.get("VC") if isinstance(r0, dict) else None
+                if raw is None and isinstance(r0, dict):
+                    raw = next((v for k, v in r0.items() if v is not None), None)
+                if raw is not None:
+                    s = str(raw).strip()
+                    if s.isdigit() and len(s) >= 6:
+                        v = int(s[:6])
+                        if 200001 <= v <= 209912:
+                            from_version = v
+        except Exception as e:
+            _async_log_util.debug(f"[cqs_snapshot] MAX(version_code) 失败: {e}")
+        if from_version is not None:
+            self._cqs_snapshot_yyyymm_done = True
+            self._cqs_snapshot_yyyymm_val = from_version
+            return from_version
+        try:
+            sql_dt = (
+                "SELECT MAX(create_date) AS latest FROM default.dws_cqs_enterprise_query_view_full "
+                "WHERE is_exit_press_reduce = '是'"
+            )
+            result = exec_sql(ds=self.ds, sql=sql_dt)
+            row = (result or {}).get("data") or []
+            if row:
+                r0 = row[0] if isinstance(row[0], dict) else {}
+                raw = r0.get("latest") or r0.get("Latest") if isinstance(r0, dict) else None
+                if raw is None and isinstance(r0, dict):
+                    raw = next((v for k, v in r0.items() if v is not None), None)
+                from_create = self._parse_row_datetime_to_yyyymm(raw)
+        except Exception as e:
+            _async_log_util.debug(f"[cqs_snapshot] MAX(create_date) 回退失败: {e}")
+        self._cqs_snapshot_yyyymm_done = True
+        self._cqs_snapshot_yyyymm_val = from_create
+        return from_create
+
+    def _cap_cqs_sql_snapshot_time(self, sql: str) -> tuple[str, Optional[str]]:
+        """若 SQL 针对 cqs 法人户数视图且 version_code/create_date 批次晚于库内实际最新批次，回写为最新批次并生成分析说明。"""
+        self._cqs_snapshot_time_notice = None
+        if not sql or not self.ds:
+            return sql, None
+        sl = sql.lower()
+        if "dws_cqs" not in sl and "cqs_enterprise" not in sl:
+            return sql, None
+        max_yyyymm = self._fetch_cqs_max_snapshot_yyyymm()
+        if max_yyyymm is None:
+            return sql, None
+        max_s = f"{max_yyyymm:06d}"
+        y_cn, m_cn = max_yyyymm // 100, max_yyyymm % 100
+        changed = False
+        new_sql = sql
+
+        def repl_version(m: re.Match) -> str:
+            nonlocal changed
+            vc = int(m.group("vc"))
+            if vc > max_yyyymm:
+                changed = True
+                return m.group(0).replace(m.group("vc"), max_s)
+            return m.group(0)
+
+        # "version_code" = '202604' 或 version_code = '202604'
+        new_sql = re.sub(
+            r'(?:["\']version_code["\']|version_code)\s*=\s*(["\'])(?P<vc>\d{6})\1',
+            repl_version,
+            new_sql,
+            flags=re.IGNORECASE,
+        )
+
+        def repl_like_ym(m: re.Match) -> str:
+            nonlocal changed
+            yy, mm = int(m.group(2)), int(m.group(3))
+            yyyymm = yy * 100 + mm
+            if yyyymm > max_yyyymm:
+                changed = True
+                return m.group(0).replace(
+                    f"{m.group(2)}-{m.group(3)}",
+                    f"{y_cn:04d}-{m_cn:02d}",
+                )
+            return m.group(0)
+
+        new_sql = re.sub(
+            r'(?:["\']create_date["\']|create_date)\s+LIKE\s*(["\'])(\d{4})-(\d{2})%',
+            repl_like_ym,
+            new_sql,
+            flags=re.IGNORECASE,
+        )
+
+        def repl_like_yyyymm(m: re.Match) -> str:
+            nonlocal changed
+            yyyymm = int(m.group(2))
+            if yyyymm > max_yyyymm:
+                changed = True
+                return m.group(0).replace(m.group(2), max_s)
+            return m.group(0)
+
+        new_sql = re.sub(
+            r'(?:["\']create_date["\']|create_date)\s+LIKE\s*(["\'])(\d{6})%',
+            repl_like_yyyymm,
+            new_sql,
+            flags=re.IGNORECASE,
+        )
+
+        if not changed:
+            return new_sql, None
+        notice = (
+            f"> **法人户数数据时点（必须遵守）**：用户询问的统计月份晚于压减口径下 **MAX(version_code)** 已有批次。"
+            f"本次 SQL 已回写为 **version_code='{max_s}'**（{y_cn}年{m_cn:02d}月）；"
+            f"分析须写清「数据最新仅到{y_cn}年{m_cn:02d}月」，勿按用户更晚月份表述。"
+        )
+        _async_log_util.info(f"[cqs_snapshot] 已将 SQL 中晚于 {max_s} 的时间条件回写为最新批次")
+        return new_sql, notice
+
+    @staticmethod
+    def _extract_explicit_yyyymm_from_question(q: str) -> Optional[int]:
+        """从问句中解析「YYYY年M月」为 YYYYMM；无则 None。"""
+        if not q:
+            return None
+        m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", q)
+        if not m:
+            return None
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12 and 2000 <= y <= 2099:
+            return y * 100 + mo
+        return None
+
+    def _is_cqs_legal_entity_intent(self, q: str) -> bool:
+        if not q:
+            return False
+        if "法人户数" in q:
+            return True
+        if "户数" in q and ("集团" in q or "法人" in q):
+            return True
+        return False
+
+    def _cqs_reject_message_if_requested_month_beyond_data(self) -> Optional[str]:
+        """用户明确问到某年某月法人户数，且该月晚于库内最新 version_code 批次时返回提示文案（不查 SQL、不静默改月）。"""
+        if not self.ds:
+            return None
+        q = (self.chat_question.question or "").strip()
+        if not self._is_cqs_legal_entity_intent(q):
+            return None
+        user_ym = self._extract_explicit_yyyymm_from_question(q)
+        if user_ym is None:
+            return None
+        # 不强制要求 schema 含 dws_cqs（检索可能漏表），法人户数意图下直接查库内 MAX(version_code)
+        max_ym = self._fetch_cqs_max_snapshot_yyyymm()
+        if max_ym is None:
+            return None
+        if user_ym <= max_ym:
+            return None
+        y1, m1 = max_ym // 100, max_ym % 100
+        y2, m2 = user_ym // 100, user_ym % 100
+        return (
+            f"当前数据库中，法人户数（压减口径）数据最新仅更新至 **{y1}年{m1:02d}月**，"
+            f"尚无可查询的 **{y2}年{m2:02d}月** 数据。\n\n"
+            f"请将提问中的时间改为 **{y1}年{m1:02d}月及以前** 后再试。"
+        )
 
     def init_messages(self):
         """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
-        
+        self._cqs_snapshot_yyyymm_done = False
+        self._cqs_snapshot_yyyymm_val = None
+
         # 多轮对话：追问场景做问题增强；单请求内只增强一次，已增强则直接复用
         if self.original_question is None:  # 只在第一次调用时保存原始问题
             self.original_question = self.chat_question.question
@@ -388,7 +598,24 @@ class LLMService:
             original_custom_prompt = self.chat_question.custom_prompt or ""
             self.chat_question.custom_prompt = f"{original_custom_prompt}\n\n{jq_zbval_rule}" if original_custom_prompt else jq_zbval_rule
             _async_log_util.info("[jq_zbval] 已注入公司字段脏数据过滤规则")
-        
+
+        if "dws_cqs" in schema:
+            cap_ym = self._fetch_cqs_max_snapshot_yyyymm()
+            if cap_ym:
+                cy, cm = cap_ym // 100, cap_ym % 100
+                cqs_time_rule = (
+                    f"<rule>**法人户数 dws_cqs 数据时点**：压减=是 口径以 **MAX(version_code)** 为最新批次，当前至 **{cy}年{cm:02d}月**（version_code='{cap_ym:06d}'）。"
+                    f"即使用户问到更晚年月，version_code 也不得超过该值；create_date 易错、勿单独作为时间依据。</rule>"
+                )
+                op = self.chat_question.custom_prompt or ""
+                self.chat_question.custom_prompt = f"{op}\n\n{cqs_time_rule}" if op else cqs_time_rule
+                _async_log_util.info(f"[cqs] 已注入快照上限提示: {cy}-{cm:02d}")
+
+        audit_prompt = collect_sql_generation_audit_prompt(self.chat_question.question or "", schema)
+        if audit_prompt:
+            op = self.chat_question.custom_prompt or ""
+            self.chat_question.custom_prompt = f"{op}{audit_prompt}" if op else audit_prompt.strip()
+
         # add sys prompt
         self.sql_message.append(SystemMessage(content=self.chat_question.sql_sys_question()))
         
@@ -655,12 +882,18 @@ class LLMService:
         full_analysis_text = ''
         token_usage = {}
         res = process_stream(self.llm.stream(analysis_msg), token_usage)
+        reflection_enabled = bool(getattr(settings, "ANALYSIS_REFLECTION_ENABLED", True))
         for chunk in res:
             if chunk.get('content'):
                 full_analysis_text += chunk.get('content')
             if chunk.get('reasoning_content'):
                 full_thinking_text += chunk.get('reasoning_content')
-            # 不直接向前端输出初稿 chunk；最终仅输出修正后的版本
+            # 启用反思时：先流式输出初稿，避免前端长时间无内容（反思完成后会再下发最终稿覆盖）
+            if reflection_enabled and (chunk.get('content') or chunk.get('reasoning_content')):
+                yield {
+                    "content": chunk.get('content') or "",
+                    "reasoning_content": chunk.get('reasoning_content') or "",
+                }
 
         # 反思与修正：基于真实数据对初稿做 Fact-check & Sanitization，避免幻觉/提示词泄露
         try:
@@ -825,7 +1058,11 @@ class LLMService:
                 "> **年报表时间口径（必须遵守）**：本次数据来源于年报表，时间口径为**年份**。"
                 "分析中涉及时间时直接使用「2024年」「各年度」等表述，勿使用「2024年4月」「截至XX年X月」或任何带月份的表述；勿出现任何字段名、编码或技术说明。"
             )
-        
+
+        if getattr(self, "_cqs_snapshot_time_notice", None):
+            custom_prompt_parts.append(self._cqs_snapshot_time_notice)
+            _async_log_util.info("[数据分析] 已注入法人户数时点修正说明")
+
         # 合并所有 custom_prompt 部分
         self.chat_question.custom_prompt = "\n\n".join(custom_prompt_parts) if custom_prompt_parts else ""
 
@@ -851,7 +1088,6 @@ class LLMService:
                 full_analysis_text += chunk.get('content')
             if chunk.get('reasoning_content'):
                 full_thinking_text += chunk.get('reasoning_content')
-            # 不直接向前端输出初稿 chunk；最终仅输出修正后的版本
 
         # 反思与修正：基于真实数据对初稿做 Fact-check & Sanitization，避免幻觉/提示词泄露
         try:
@@ -1467,6 +1703,47 @@ class LLMService:
                     "reasoning_content": hint_message,
                 }
             )
+            return
+
+        cqs_rej_inner = self._cqs_reject_message_if_requested_month_beyond_data()
+        if cqs_rej_inner:
+            error_msg = orjson.dumps({"success": False, "message": cqs_rej_inner}).decode()
+            _async_log_util.info(f"[cqs] generate_sql 内拒答（时点不可用）: {cqs_rej_inner[:100]}")
+            trace = self._trace_start(
+                node_key="sql_generation",
+                node_name="SQL生成",
+                input_payload={"messages": [{"type": "human", "content": self.chat_question.question}], "blocked": "cqs_future_month"},
+            )
+            yield {"content": error_msg, "reasoning_content": cqs_rej_inner}
+            self.sql_message.append(AIMessage(error_msg))
+            self.current_logs[OperationEnum.GENERATE_SQL] = start_log(
+                session=self.session,
+                ai_modal_id=self.chat_question.ai_modal_id,
+                ai_modal_name=self.chat_question.ai_modal_name,
+                operate=OperationEnum.GENERATE_SQL,
+                record_id=self.record.id,
+                full_message=[
+                    {"type": "human", "content": self.chat_question.question},
+                    {"type": "ai", "content": error_msg},
+                ],
+            )
+            self.current_logs[OperationEnum.GENERATE_SQL] = end_log(
+                session=self.session,
+                log=self.current_logs[OperationEnum.GENERATE_SQL],
+                full_message=[
+                    {"type": "human", "content": self.chat_question.question},
+                    {"type": "ai", "content": error_msg},
+                ],
+                reasoning_content="",
+                token_usage={},
+            )
+            self.record = save_sql_answer(
+                session=self.session,
+                record_id=self.record.id,
+                current_user=self.current_user,
+                answer=orjson.dumps({"content": error_msg}).decode(),
+            )
+            self._trace_end(trace, output_payload={"result": error_msg, "reasoning_content": cqs_rej_inner})
             return
         
         # append current question（法人户数且未指定时间时 current_time 取自产权表压减=是的最新创建时间）
@@ -2283,6 +2560,8 @@ class LLMService:
         sql, *_ = self.check_sql(res=res)
         sql = self._rewrite_jq_zbval_year_sys_datatime(sql)
         sql = apply_business_rules(sql)
+        sql, cqs_notice = self._cap_cqs_sql_snapshot_time(sql)
+        self._cqs_snapshot_time_notice = cqs_notice
         save_sql(session=self.session, sql=sql, record_id=self.record.id, current_user=self.current_user)
 
         self.chat_question.sql = sql
@@ -2774,6 +3053,69 @@ class LLMService:
                     'description': '正在生成SQL语句...'
                 }).decode() + '\n\n'
 
+            cqs_rej = self._cqs_reject_message_if_requested_month_beyond_data()
+            if cqs_rej:
+                error_msg = orjson.dumps({"success": False, "message": cqs_rej}).decode()
+                _async_log_util.info(f"[cqs] 询问月份晚于库内最新批次，拒答: {cqs_rej[:120]}")
+                trace_cqs = self._trace_start(
+                    node_key="sql_generation",
+                    node_name="SQL生成",
+                    input_payload={
+                        "messages": [{"type": "human", "content": self.chat_question.question}],
+                        "blocked": "cqs_future_month",
+                    },
+                )
+                self.current_logs[OperationEnum.GENERATE_SQL] = start_log(
+                    session=self.session,
+                    ai_modal_id=self.chat_question.ai_modal_id,
+                    ai_modal_name=self.chat_question.ai_modal_name,
+                    operate=OperationEnum.GENERATE_SQL,
+                    record_id=self.record.id,
+                    full_message=[
+                        {"type": "human", "content": self.chat_question.question},
+                        {"type": "ai", "content": error_msg},
+                    ],
+                )
+                self.current_logs[OperationEnum.GENERATE_SQL] = end_log(
+                    session=self.session,
+                    log=self.current_logs[OperationEnum.GENERATE_SQL],
+                    full_message=[
+                        {"type": "human", "content": self.chat_question.question},
+                        {"type": "ai", "content": error_msg},
+                    ],
+                    reasoning_content="",
+                    token_usage={},
+                )
+                self.record = save_sql_answer(
+                    session=self.session,
+                    record_id=self.record.id,
+                    current_user=self.current_user,
+                    answer=orjson.dumps({"content": error_msg}).decode(),
+                )
+                self._trace_end(
+                    trace_cqs,
+                    output_payload={"result": error_msg, "reasoning_content": cqs_rej},
+                )
+                if in_chat:
+                    yield 'data:' + orjson.dumps({
+                        "content": cqs_rej,
+                        "reasoning_content": "",
+                        "type": "analysis-result",
+                    }).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({
+                        "type": "step-complete",
+                        "step": "sql-generation",
+                        "step_name": "SQL生成",
+                        "description": "未生成SQL（该时点数据尚未入库）",
+                        "result": {"message": cqs_rej},
+                    }).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({"type": "finish"}).decode() + '\n\n'
+                if not stream:
+                    json_result["success"] = False
+                    json_result["message"] = cqs_rej
+                    yield json_result
+                return
+
             # 启动快速模板匹配的日志记录（先启动，如果失败会在后面覆盖）
             straight_log = start_log(session=self.session,
                                     ai_modal_id=self.chat_question.ai_modal_id,
@@ -3152,9 +3494,18 @@ class LLMService:
                 if chunk.get('reasoning_content'):
                     full_analysis_thinking += chunk.get('reasoning_content')
                 if in_chat:
-                    yield 'data:' + orjson.dumps(
-                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
-                         'type': 'analysis-result'}).decode() + '\n\n'
+                    event_type = chunk.get('type') or 'analysis-result'
+                    payload = {
+                        'content': chunk.get('content'),
+                        'reasoning_content': chunk.get('reasoning_content'),
+                        'type': event_type,
+                    }
+                    # 透传 generate_analysis 额外字段（reflection_enabled/reflection_changed 等）
+                    for k, v in chunk.items():
+                        if k in ('type', 'content', 'reasoning_content'):
+                            continue
+                        payload[k] = v
+                    yield 'data:' + orjson.dumps(payload).decode() + '\n\n'
             
             # 数据分析完成
             if in_chat:
@@ -3300,9 +3651,18 @@ class LLMService:
                 # generate analysis
                 analysis_res = self.generate_analysis()
                 for chunk in analysis_res:
-                    yield 'data:' + orjson.dumps(
-                        {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
-                         'type': 'analysis-result'}).decode() + '\n\n'
+                    event_type = chunk.get('type') or 'analysis-result'
+                    payload = {
+                        'content': chunk.get('content'),
+                        'reasoning_content': chunk.get('reasoning_content'),
+                        'type': event_type,
+                    }
+                    # 透传额外字段（用于调试/前端展示等）
+                    for k, v in chunk.items():
+                        if k in ('type', 'content', 'reasoning_content'):
+                            continue
+                        payload[k] = v
+                    yield 'data:' + orjson.dumps(payload).decode() + '\n\n'
                 yield 'data:' + orjson.dumps({'type': 'info', 'msg': 'analysis generated'}).decode() + '\n\n'
 
                 yield 'data:' + orjson.dumps({'type': 'analysis_finish'}).decode() + '\n\n'

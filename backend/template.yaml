@@ -312,7 +312,7 @@ template:
           <terminologies>：提供一组术语，块内每一个<terminology>就是术语，其中同一个<words>内的多个<word>代表术语的多种叫法，也就是术语与它的同义词，<description>即该术语对应的描述，其中也可能是能够用来参考的计算公式，或者是一些其他的查询条件。**重要**：当用户问题涉及术语中提到的概念时，必须严格按照术语描述中的规则生成SQL，包括指定的表名、字段名、筛选条件等。例如，如果术语描述中指定了"应从dws_cgn_jq_zbval_month表中取zb_title字段为'四、利润总额（亏损总额以"-"号填列）_本年累计数'去计算"，则必须使用该表和字段，不能使用其他表或字段。术语规则的优先级高于表结构，必须优先遵循术语规则。
           <sql-examples>：提供一组SQL示例，你可以参考这些示例来生成你的回答，其中<question>内是提问，<suggestion-answer>内是对于该<question>提问的解释或者对应应该回答的SQL示例。
         若有<Other-Infos>块，它会提供一组<content>，可能会是额外添加的背景信息，或者是额外的生成SQL的要求，请结合额外信息或要求后生成你的回答。
-        用户的提问在<user-question>内，<error-msg>内则会提供上次执行你提供的SQL时会出现的错误信息，<background-infos>内的<current-time>会告诉你用户当前提问的时间。**重要**：当<m-schema>中包含 dws_cqs 表（法人户数/企业查询）且用户问题未明确指定时间时，<current-time>表示业务数据当前可查询的最新时间（来自数据源，因数据更新滞后于实际时间约一个月）。此时 create_date（或同类时间字段）的过滤条件必须使用 <current-time> 的年月，例如 <current-time> 为 2026-01-31 14:07:13 则必须使用 create_date LIKE '2026-01%'。
+        用户的提问在<user-question>内，<error-msg>内则会提供上次执行你提供的SQL时会出现的错误信息，<background-infos>内的<current-time>会告诉你用户当前提问的时间。**重要**：当<m-schema>中包含 dws_cqs 表（法人户数/企业查询）且用户问题未明确指定时间时，<current-time>表示压减=是口径下 **MAX(version_code)** 对应的统计年月（由数据源计算）。SQL 中须用 **version_code** 与该年月一致（如 202601）；create_date 勿单独作为时间依据。
         若存在<context>块，它包含精简的结构化上下文信息：
           - <entity-ref type="xxx">：实体引用，如上一轮查询返回的公司列表、城市列表等，用于理解"这些"、"它们"等指代词
           - <sql-pattern>：SQL结构模式（占位符形式），可用于参考SQL结构，但不要直接复制历史SQL的具体值
@@ -339,7 +339,7 @@ template:
           **术语规则优先级**：如果<terminologies>中提供了术语规则，必须严格按照术语规则生成SQL。术语规则中指定的表名、字段名、筛选条件等必须严格遵守，即使表结构中存在其他类似的表或字段，也应优先使用术语规则中指定的。
         </rule>
         <rule>
-          **cqs 表时间**：当 SQL 涉及 dws_cqs 表（法人户数/企业查询）且用户问题未明确指定时间时，create_date（或同类时间字段）的过滤条件必须与 <current-time> 的年月一致，例如 <current-time> 为 2026-01-31 时使用 create_date LIKE '2026-01%'。
+          **cqs 表时间**：当 SQL 涉及 dws_cqs 表（法人户数）且用户未明确指定时间时，**version_code** 必须与 <current-time> 的年月一致（如 <current-time> 为 2026-01-01 则 version_code = '202601'）。压减=是 口径下以 version_code 为准。
         </rule>
         <rule>
           **jq_zbval 表规则**：当 SQL 涉及 dws_cgn_jq_zbval_year 或 dws_cgn_jq_zbval_month 表时：① 必须对 sys_unittitle 排除脏数据（注销、虚拟、处置清除）；② 查某个公司的经营情况指标时，因表中公司名称不统一（部分需加「本部」后缀），使用 sys_unittitle IN ('公司名', '公司名（本部）')；③ 查集团层经营情况指标时，固定使用 sys_unittitle = '中国广核集团有限公司（合并）'；④ **年报表 dws_cgn_jq_zbval_year 的 sys_datatime** 为年报周期码（后两位非月份），SELECT 中若展示该时间维度须用 LEFT(sys_datatime, 4) AS \"year\"，避免被误读为年月。

@@ -10,12 +10,40 @@ from common.utils.utils import _async_log_util
 
 # 需在 SELECT 中对 COUNT(DISTINCT name) 做 +1 的省份（法人户数特殊统计规则）
 # 说明：这里按你的业务口径配置；后续可迁移到配置文件/数据库规则表
-PROVINCE_COUNT_PLUS_ONE = ("黑龙江省", "广东省")
+PROVINCE_COUNT_PLUS_ONE = ("广东省")
 
 # 规则列表：按顺序应用，每条为 {"condition": callable(sql)->bool, "action": callable(sql)->str}
+def _condition_overseas_cqs_strip_count_plus_one(sql: str) -> bool:
+    """海外/境外法人户数 SQL 不应带 COUNT(DISTINCT name)+1；若模型误写则去掉（先于省口径 +1）。"""
+    sl = sql.lower()
+    if "dws_cqs" not in sl and "enterprise_query_view" not in sl:
+        return False
+    if not any(k in sl for k in ("海外", "境外")):
+        return False
+    return bool(
+        re.search(r"COUNT\s*\(\s*DISTINCT\s*\"?name\"?\s*\)\s*\+\s*1", sql, flags=re.IGNORECASE)
+    )
+
+
+def _action_strip_count_distinct_name_plus_one(sql: str) -> str:
+    new_sql = re.sub(
+        r"(COUNT\s*\(\s*DISTINCT\s*\"?name\"?\s*\))\s*\+\s*1",
+        r"\1",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    if new_sql != sql:
+        _async_log_util.info("[业务规则] 已应用：海外/境外口径去除 COUNT(DISTINCT name)+1")
+    return new_sql
+
+
 def _condition_province_count_plus_one(sql: str) -> bool:
     """SQL 中是否包含指定省份的 name_1 条件（且为法人视图表）。"""
     if "dws_cqs_enterprise_query_view_full" not in sql and "enterprise_query_view" not in sql:
+        return False
+    # 海外/境外场景不再叠加省 +1
+    sl = sql.lower()
+    if any(k in sl for k in ("海外", "境外")):
         return False
     for province in PROVINCE_COUNT_PLUS_ONE:
         # 匹配 name_1 = '黑龙江省' 或 "name_1" = "黑龙江省" 等（带不带双引号都兼容）
@@ -36,8 +64,9 @@ def _action_count_distinct_name_plus_one(sql: str) -> str:
     return new_sql
 
 
-# 注册的规则：(condition, action)
+# 注册的规则：(condition, action)，按顺序执行
 _RULES: List[tuple] = [
+    (_condition_overseas_cqs_strip_count_plus_one, _action_strip_count_distinct_name_plus_one),
     (_condition_province_count_plus_one, _action_count_distinct_name_plus_one),
 ]
 

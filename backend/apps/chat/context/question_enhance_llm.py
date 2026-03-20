@@ -12,6 +12,18 @@ import requests
 from common.core.config import settings
 from common.utils.utils import _async_log_util
 
+# 产业名称映射表
+INDUSTRY_NAMES = {
+    '新能源', '资本控股', '能源国际', '核技术', '核电', '集团/股份', 
+    '环保/节能', '核燃料', '核服', '英国核电', '数字化产业', '司库'
+}
+
+# 产业名称关键词映射
+INDUSTRY_KEYWORDS = {
+    '集团股份': '集团/股份',
+    '环保': '环保/节能'
+}
+
 QUESTION_ENHANCE_SYSTEM_PROMPT = """你是一个智能问数系统的「追问补全专家」。你的任务是：仅对用户当前问题进行指代补全，使其成为一句可独立理解的完整查询语句，不得改变原始查询意图。
 
 【核心原则（最高优先级）】
@@ -203,6 +215,13 @@ def rewrite_question_with_llm(
             content = content.split("\n")[0].strip()
         if not content:
             return None
+        
+        # 验证并纠正产业名称
+        corrected_content = validate_and_correct_industry(content)
+        if corrected_content != content:
+            _async_log_util.info(f"[问题增强-LLM] 产业名称纠正: {content[:80]} → {corrected_content[:80]}")
+            content = corrected_content
+        
         _async_log_util.info(f"[问题增强-LLM] 原始: {current_question[:60]}, 补全: {content[:80]}")
         return content
     except requests.exceptions.Timeout:
@@ -214,3 +233,25 @@ def rewrite_question_with_llm(
     except Exception as e:
         _async_log_util.warning(f"[问题增强-LLM] 异常: {e}")
         return None
+
+
+def validate_and_correct_industry(content: str) -> str:
+    """验证并纠正产业名称，确保使用正确的产业名称"""
+    # 首先检查是否包含正确的产业名称
+    for industry in INDUSTRY_NAMES:
+        if industry in content:
+            return content
+    
+    # 检查是否包含产业关键词，替换为正确的产业名称
+    for keyword, correct_industry in INDUSTRY_KEYWORDS.items():
+        if keyword in content:
+            # 替换关键词为正确的产业名称
+            content = content.replace(keyword, correct_industry)
+            return content
+    
+    # 检查是否包含错误的产业名称组合，如"集团数字化产业"
+    if "集团数字化产业" in content:
+        content = content.replace("集团数字化产业", "集团/股份")
+        return content
+    
+    return content

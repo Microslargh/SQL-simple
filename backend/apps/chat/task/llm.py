@@ -3354,14 +3354,18 @@ class LLMService:
                 result = self.execute_sql(sql=real_execute_sql)
             except Exception as e:
                 err_msg = str(e) if str(e) else traceback.format_exc(limit=2)
+                error_payload = orjson.dumps({
+                    'message': 'Execute SQL Failed',
+                    'traceback': err_msg,
+                    'type': 'exec-sql-err'
+                }).decode()
                 if in_chat:
                     yield 'data:' + orjson.dumps({
                         'type': 'step-error',
                         'step': 'sql-execution',
-                        'step_name': 'SQL执行',
-                        'error': f'SQL执行失败：{err_msg}'
+                        'step_name': 'SQL执行'
                     }).decode() + '\n\n'
-                    yield 'data:' + orjson.dumps({'content': err_msg, 'type': 'error'}).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({'content': error_payload, 'type': 'error'}).decode() + '\n\n'
                     yield 'data:' + orjson.dumps({'type': 'finish'}).decode() + '\n\n'
                 if not stream:
                     json_result['success'] = False

@@ -28,7 +28,6 @@ class AlignTableDataCell extends TableDataCell {
   }
 }
 
-<<<<<<< HEAD
 const TABLE_HEADER_HEIGHT = 40
 const TABLE_ROW_HEIGHT = 32
 const TABLE_MAX_HEIGHT = 360

@@ -12,16 +12,24 @@ import requests
 from common.core.config import settings
 from common.utils.utils import _async_log_util
 
-# 产业名称映射表
-INDUSTRY_NAMES = {
-    '新能源', '资本控股', '能源国际', '核技术', '核电', '集团/股份', 
+# 统一产业名称（产权表、久其月报、决算表共用）
+INDUSTRY_CANONICAL = [
+    '新能源', '资本控股', '能源国际', '核技术', '核电', '集团/股份',
     '环保/节能', '核燃料', '核服', '英国核电', '数字化产业', '司库'
-}
+]
 
-# 产业名称关键词映射
-INDUSTRY_KEYWORDS = {
+# 别名 -> 统一产业名称
+INDUSTRY_ALIAS_TO_CANONICAL = {
+    '集团股份产业': '集团/股份',
     '集团股份': '集团/股份',
-    '环保': '环保/节能'
+    '股份产业': '集团/股份',
+    '股份': '集团/股份',
+    '环保节能': '环保/节能',
+    '环保产业': '环保/节能',
+    '节能环保': '环保/节能',
+    '环保': '环保/节能',
+    '数字产业': '数字化产业',
+    '数字化': '数字化产业',
 }
 
 QUESTION_ENHANCE_SYSTEM_PROMPT = """你是一个智能问数系统的「追问补全专家」。你的任务是：仅对用户当前问题进行指代补全，使其成为一句可独立理解的完整查询语句，不得改变原始查询意图。
@@ -216,8 +224,8 @@ def rewrite_question_with_llm(
         if not content:
             return None
         
-        # 验证并纠正产业名称
-        corrected_content = validate_and_correct_industry(content)
+        # 验证并纠正产业名称（当前问句优先，避免被历史产业误带偏）
+        corrected_content = validate_and_correct_industry(content, current_question)
         if corrected_content != content:
             _async_log_util.info(f"[问题增强-LLM] 产业名称纠正: {content[:80]} → {corrected_content[:80]}")
             content = corrected_content
@@ -235,23 +243,42 @@ def rewrite_question_with_llm(
         return None
 
 
-def validate_and_correct_industry(content: str) -> str:
-    """验证并纠正产业名称，确保使用正确的产业名称"""
-    # 首先检查是否包含正确的产业名称
-    for industry in INDUSTRY_NAMES:
-        if industry in content:
-            return content
-    
-    # 检查是否包含产业关键词，替换为正确的产业名称
-    for keyword, correct_industry in INDUSTRY_KEYWORDS.items():
-        if keyword in content:
-            # 替换关键词为正确的产业名称
-            content = content.replace(keyword, correct_industry)
-            return content
-    
-    # 检查是否包含错误的产业名称组合，如"集团数字化产业"
-    if "集团数字化产业" in content:
-        content = content.replace("集团数字化产业", "集团/股份")
+def _extract_canonical_industry(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for name in INDUSTRY_CANONICAL:
+        if name in text:
+            return name
+    for alias, canonical in INDUSTRY_ALIAS_TO_CANONICAL.items():
+        if alias in text:
+            return canonical
+    return None
+
+
+def validate_and_correct_industry(content: str, current_question: str) -> str:
+    """按“当前问句优先”纠正产业名称，避免把上一轮产业错误继承到本轮。"""
+    if not content:
         return content
-    
+
+    target_industry = _extract_canonical_industry(current_question or "")
+    content_industry = _extract_canonical_industry(content)
+
+    # 当前问句明确了产业：若补全结果中的产业不同，强制替换为当前问句产业
+    if target_industry:
+        # 先替换补全结果里识别到的产业
+        if content_industry and content_industry != target_industry:
+            content = content.replace(content_industry, target_industry)
+        # 再替换补全结果里的别名
+        for alias, canonical in INDUSTRY_ALIAS_TO_CANONICAL.items():
+            if alias in content and canonical != target_industry:
+                content = content.replace(alias, target_industry)
+        # 如果补全中完全没有产业词，但当前问句是“X产业的呢”，追加标准产业名
+        if _extract_canonical_industry(content) is None and '产业' in (current_question or ''):
+            content = f"{target_industry}的法人户数是多少"
+        return content
+
+    # 当前问句未指明产业：仅做别名标准化
+    for alias, canonical in INDUSTRY_ALIAS_TO_CANONICAL.items():
+        if alias in content:
+            content = content.replace(alias, canonical)
     return content

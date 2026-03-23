@@ -1,15 +1,15 @@
 """
-年报表与月报表选择规则工具函数
-根据用户问题中的时间粒度（年+月 vs 年）和当前时间，智能选择使用 dws_cgn_jq_zbval_year 还是 dws_cgn_jq_zbval_month
+按表更新时间规则做时间可用性校验，并在适用时生成表选择规则。
+
+当前覆盖：
+- 月报/快报表 dws_cgn_jq_zbval_month：数据 T 月在 T+1 月 12 日可查
+- 年报/决算表 dws_cgn_jq_zbval_year：数据 Y 年在 Y+1 年 4 月 26 日可查
+- 产权 dws_cqs_enterprise_query_view_full：数据 T 月在 T+1 月 2 日可查
+- 税务 dws_tmis_tax_details_full：数据 T 月在 T+1 月 12 日可查
 """
 import re
 from datetime import datetime
-from typing import Optional, Dict, Literal
-
-
-# 年报/月报分界：当年在此日期之前用去年12月月报，在此日期及之后用去年年报表
-YEAR_REPORT_CUTOFF_MONTH = 4
-YEAR_REPORT_CUTOFF_DAY = 25
+from typing import Optional, Dict
 
 # 需要应用此规则的指标关键词
 TARGET_INDICATORS = [
@@ -23,6 +23,22 @@ TARGET_INDICATORS = [
     "利润",
     "收入",
     "担保",
+]
+
+# 产权相关关键词（按月时效）
+CQS_KEYWORDS = [
+    "产权",
+    "法人户数",
+    "法人数量",
+]
+
+# 税务相关关键词（按月时效）
+TAX_KEYWORDS = [
+    "税务",
+    "纳税",
+    "税额",
+    "税费",
+    "税金",
 ]
 
 
@@ -75,7 +91,36 @@ def _contains_target_indicator(question: str) -> bool:
     return False
 
 
-def generate_table_selection_rule(question: str, current_time: Optional[str] = None) -> Optional[Dict[str, any]]:
+def _contains_any_keyword(question: str, keywords: list[str]) -> bool:
+    q = (question or "").lower()
+    for k in keywords:
+        if k.lower() in q:
+            return True
+    return False
+
+
+def _next_month(year: int, month: int) -> tuple[int, int]:
+    if month == 12:
+        return year + 1, 1
+    return year, month + 1
+
+
+def _available_at_for_monthly_table(year: int, month: int, release_day_in_next_month: int) -> datetime:
+    ny, nm = _next_month(year, month)
+    # 规则口径：次月 X 号凌晨后，按次日可查（例如次月11号凌晨 -> 12号可查）
+    return datetime(ny, nm, release_day_in_next_month + 1, 0, 0, 0)
+
+
+def _available_at_for_yearly_table(year: int) -> datetime:
+    # 规则口径：次年4月25号凌晨后，按4月26日可查
+    return datetime(year + 1, 4, 26, 0, 0, 0)
+
+
+def generate_table_selection_rule(
+    question: str,
+    current_time: Optional[str] = None,
+    schema: Optional[str] = None,
+) -> Optional[Dict[str, any]]:
     """
     根据用户问题和当前时间，生成表选择规则信息
     
@@ -92,10 +137,6 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
         - table_name: 表名（当 status="rule" 时）
         - data_source_hint: 数据来源提示文本（用于分析时的温馨提示）
     """
-    # 检查是否包含目标指标
-    if not _contains_target_indicator(question):
-        return None
-    
     # 解析当前时间（先解析，便于将「今年」「去年」「明年」转为具体年份）
     if current_time:
         try:
@@ -112,7 +153,6 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
     else:
         current_dt = datetime.now()
     current_year = current_dt.year
-    current_month = current_dt.month
 
     # 将「今年」「去年」「明年」等替换为具体年份后再提取时间，以支持「今年8月」等问法
     q_normalized = (
@@ -123,18 +163,56 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
     year, month = _extract_year_month(q_normalized)
     if year is None:
         return None
-    # 数据库通常滞后约 1 个月：当前 2026 年 3 月时，仅有 2026 年 2 月及以前数据
-    if current_month <= 1:
-        latest_year, latest_month = current_year - 1, 12
-    else:
-        latest_year, latest_month = current_year, current_month - 1
 
-    # 规则1: 如果问题明确包含"年+月"（例如 "2025年1月"、"今年8月"），先判断是否超出数据范围
-    if month is not None:
-        if (year, month) > (latest_year, latest_month):
+    schema_l = (schema or "").lower()
+    q_is_jq = _contains_target_indicator(question)
+    q_is_cqs = _contains_any_keyword(question, CQS_KEYWORDS)
+    q_is_tax = _contains_any_keyword(question, TAX_KEYWORDS)
+    s_has_jq = "jq_zbval" in schema_l
+    s_has_cqs = "dws_cqs_enterprise_query_view_full" in schema_l
+    s_has_tax = "dws_tmis_tax_details_full" in schema_l
+
+    # 领域判定优先级：
+    # 1) 用户问句关键词（最可靠）
+    # 2) schema 兜底（仅在问句无明显领域词时）
+    if q_is_cqs:
+        domain = "cqs"
+    elif q_is_tax:
+        domain = "tax"
+    elif q_is_jq:
+        domain = "jq"
+    elif s_has_jq and not (s_has_cqs or s_has_tax):
+        domain = "jq"
+    elif s_has_cqs and not (s_has_jq or s_has_tax):
+        domain = "cqs"
+    elif s_has_tax and not (s_has_jq or s_has_cqs):
+        domain = "tax"
+    else:
+        domain = None
+
+    # 规则 A：月报/快报表（dws_cgn_jq_zbval_month）与税务/产权均按“月”做时效判断
+    if month is not None and domain in ("jq", "cqs", "tax"):
+        # jq/tax: 次月11号凌晨 -> 次月12号可查；cqs: 次月1号凌晨 -> 次月2号可查
+        release_day = 11
+        table_name = "dws_cgn_jq_zbval_month"
+        table_label = "月报/快报"
+        if domain == "cqs":
+            release_day = 1
+            table_name = "dws_cqs_enterprise_query_view_full"
+            table_label = "产权"
+        elif domain == "tax":
+            release_day = 11
+            table_name = "dws_tmis_tax_details_full"
+            table_label = "税务"
+
+        available_at = _available_at_for_monthly_table(year, month, release_day_in_next_month=release_day)
+        if current_dt < available_at:
             return {
                 "status": "no_data",
-                "message": f"当前数据库仅有{latest_year}年{latest_month}月及以前的数据，无法提供{year}年{month}月的数据。请缩小时间范围后重试。",
+                "message": (
+                    f"你查询的时间为 {year}年{month}月，当前尚未到该批次可查询时间。"
+                    f"{table_label}表 `{table_name}` 需在 {available_at.year}年{available_at.month}月{available_at.day}日 00:00 之后才可查询。"
+                ),
                 "rule_text": None,
                 "table_type": None,
                 "table_name": None,
@@ -142,6 +220,30 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
                 "year": year,
                 "month": month,
             }
+        if domain == "jq":
+            rule_text = (
+                f"<rule>\n"
+                f"用户查询的是 {year}年{month}月的指标数据，必须使用月报表 dws_cgn_jq_zbval_month 进行查询。"
+                f"查询条件应匹配年份和月份（例如：年份字段 = {year} AND 月份字段 = {month:02d} 或类似格式）。\n"
+                f"</rule>"
+            )
+            return {
+                "status": "rule",
+                "rule_text": rule_text,
+                "table_type": "month",
+                "table_name": "dws_cgn_jq_zbval_month",
+                "data_source_hint": "> [!TIP]\n> **数据来源提示**：当前数据来源于月报快报表（`dws_cgn_jq_zbval_month`）。"
+            }
+
+        # 对 cqs/tax 仅做时效拒答，不改写业务规则
+        return None
+
+    # 规则 B：年报/决算表（dws_cgn_jq_zbval_year）按“年”做时效判断与选表
+    # 仅在 jq 指标意图下生效，避免影响其它按天更新表
+    if domain != "jq":
+        return None
+
+    if month is not None:
         rule_text = (
             f"<rule>\n"
             f"用户查询的是 {year}年{month}月的指标数据，必须使用月报表 dws_cgn_jq_zbval_month 进行查询。"
@@ -155,59 +257,26 @@ def generate_table_selection_rule(question: str, current_time: Optional[str] = N
             "table_name": "dws_cgn_jq_zbval_month",
             "data_source_hint": "> [!TIP]\n> **数据来源提示**：当前数据来源于月报快报表（`dws_cgn_jq_zbval_month`）。"
         }
-    
-    # 规则2: 如果问题只包含年份
-    # 情况2.1: 查询的是当前年份或未来年份，当前暂无数据
-    if year >= current_year:
+
+    available_at = _available_at_for_yearly_table(year)
+    if current_dt < available_at:
         return {
             "status": "no_data",
-            "message": f"当前数据库仅有{latest_year}年{latest_month}月及以前的数据，无法提供{year}年的数据。请缩小时间范围后重试。",
+            "message": (
+                f"你查询的时间为 {year}年，当前尚未到该批次可查询时间。"
+                f"年报/决算表 `dws_cgn_jq_zbval_year` 需在 {available_at.year}年{available_at.month}月{available_at.day}日 00:00 之后才可查询。"
+            ),
             "rule_text": None,
             "table_type": None,
             "table_name": None,
             "data_source_hint": None,
             "year": year,
         }
-    
-    # 情况2.2: 查询的是上一年
-    if year == current_year - 1:
-        # 分界为当年4月25日：未到4月25日使用月报表12月数据，4月25日及之后使用年报表Q4数据
-        cutoff_date = datetime(current_year, YEAR_REPORT_CUTOFF_MONTH, YEAR_REPORT_CUTOFF_DAY)
-        if current_dt < cutoff_date:
-            rule_text = (
-                f"<rule>\n"
-                f"用户查询的是 {year}年（上一年）的指标数据，当前时间为 {current_year}年{current_month}月（未超过{YEAR_REPORT_CUTOFF_MONTH}月{YEAR_REPORT_CUTOFF_DAY}日），"
-                f"必须使用月报表 dws_cgn_jq_zbval_month 进行查询，查询条件应匹配年份和月份（年份字段 = {year} AND 月份字段 = 12）。\n"
-                f"</rule>"
-            )
-            return {
-                "status": "rule",
-                "rule_text": rule_text,
-                "table_type": "month",
-                "table_name": "dws_cgn_jq_zbval_month",
-                "data_source_hint": f"> [!TIP]\n> **数据来源提示**：当前数据来源于月报快报表（`dws_cgn_jq_zbval_month`）中 {year}年12月的数据。"
-            }
-        else:
-            # 当前时间已达4月25日及之后，使用年报表的Q4数据（202504表示2025年Q4）
-            q4_period = f"{year}04"  # 例如 202504 表示 2025年Q4
-            rule_text = (
-                f"<rule>\n"
-                f"用户查询的是 {year}年（上一年）的指标数据，当前时间为 {current_year}年{current_month}月（已超过{YEAR_REPORT_CUTOFF_MONTH}月{YEAR_REPORT_CUTOFF_DAY}日），"
-                f"必须使用年报表 dws_cgn_jq_zbval_year 进行查询，查询条件应匹配年份和季度（例如：年份季度字段 = '{q4_period}' 或类似格式，表示 {year}年第四季度）。\n"
-                f"</rule>"
-            )
-            return {
-                "status": "rule",
-                "rule_text": rule_text,
-                "table_type": "year",
-                "table_name": "dws_cgn_jq_zbval_year",
-                "data_source_hint": f"> [!TIP]\n> **数据来源提示**：当前数据来源于年报决算表（`dws_cgn_jq_zbval_year`）中 {year}年第四季度的数据。"
-            }
-    
-    # 情况2.3: 查询的是更早的年份（非上一年），使用年报表
+
+    # 可查询时：使用年报表
     rule_text = (
         f"<rule>\n"
-        f"用户查询的是 {year}年（更早年份）的指标数据，必须使用年报表 dws_cgn_jq_zbval_year 进行查询。"
+        f"用户查询的是 {year}年的指标数据，必须使用年报表 dws_cgn_jq_zbval_year 进行查询。"
         f"查询条件应匹配年份（例如：年份字段 = {year} 或类似格式）。\n"
         f"</rule>"
     )

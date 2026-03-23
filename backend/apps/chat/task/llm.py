@@ -507,7 +507,7 @@ class LLMService:
         return False
 
     def _cqs_reject_message_if_requested_month_beyond_data(self) -> Optional[str]:
-        """用户明确问到某年某月法人户数，且该月晚于库内最新 version_code 批次时返回提示文案（不查 SQL、不静默改月）。"""
+        """用户明确问到某年某月法人户数，若未到产权表批次可查时间则直接提示（不查 SQL、不回退最新月）。"""
         if not self.ds:
             return None
         q = (self.chat_question.question or "").strip()
@@ -516,18 +516,19 @@ class LLMService:
         user_ym = self._extract_explicit_yyyymm_from_question(q)
         if user_ym is None:
             return None
-        # 不强制要求 schema 含 dws_cqs（检索可能漏表），法人户数意图下直接查库内 MAX(version_code)
-        max_ym = self._fetch_cqs_max_snapshot_yyyymm()
-        if max_ym is None:
+        y, m = user_ym // 100, user_ym % 100
+        if m == 12:
+            ny, nm = y + 1, 1
+        else:
+            ny, nm = y, m + 1
+        # 产权：次月1号凌晨，按次月2号可查
+        available_at = datetime(ny, nm, 2, 0, 0, 0)
+        now_dt = datetime.now()
+        if now_dt >= available_at:
             return None
-        if user_ym <= max_ym:
-            return None
-        y1, m1 = max_ym // 100, max_ym % 100
-        y2, m2 = user_ym // 100, user_ym % 100
         return (
-            f"当前数据库中，法人户数（压减口径）数据最新仅更新至 **{y1}年{m1:02d}月**，"
-            f"尚无可查询的 **{y2}年{m2:02d}月** 数据。\n\n"
-            f"请将提问中的时间改为 **{y1}年{m1:02d}月及以前** 后再试。"
+            f"你查询的时间为 **{y}年{m:02d}月**，当前尚未到产权数据可查询时间。"
+            f"`dws_cqs_enterprise_query_view_full` 需在 **{available_at.year}年{available_at.month:02d}月{available_at.day:02d}日 00:00** 后才可查询。"
         )
 
     def init_messages(self):
@@ -569,7 +570,8 @@ class LLMService:
         # 生成年报表/月报表选择规则（如果适用）
         table_selection_info = generate_table_selection_rule(
             question=self.chat_question.question,
-            current_time=self._get_effective_current_time()
+            current_time=self._get_effective_current_time(),
+            schema=self.chat_question.db_schema,
         )
         if table_selection_info:
             self.table_selection_info = table_selection_info
@@ -1665,6 +1667,18 @@ class LLMService:
         )
 
     def generate_sql(self):
+        # 兜底：某些流程可能未提前执行 init_messages（例如特定分支/快速路径），
+        # 这里再补一次按表时效规则判定，确保「超出时间范围」可被稳定拦截。
+        if not self.table_selection_info:
+            try:
+                self.table_selection_info = generate_table_selection_rule(
+                    question=self.chat_question.question,
+                    current_time=self._get_effective_current_time(),
+                    schema=self.chat_question.db_schema,
+                )
+            except Exception as e:
+                _async_log_util.debug(f"[表选择规则] generate_sql 兜底判定失败: {e}")
+
         # 检查表选择规则：如果当前暂无数据或查询时间超出数据范围，直接返回友好提示（含「当前数据库仅有X年X月及以前的数据」等）
         if self.table_selection_info and self.table_selection_info.get("status") == "no_data":
             trace = self._trace_start(
@@ -3052,6 +3066,81 @@ class LLMService:
                     'step_name': 'SQL生成',
                     'description': '正在生成SQL语句...'
                 }).decode() + '\n\n'
+
+            # 统一时效拦截（覆盖快速模板与常规SQL两条路径）：
+            # 若命中 no_data，直接提示并结束，不再进入模板匹配/SQL执行。
+            runtime_table_rule = self.table_selection_info
+            if not runtime_table_rule:
+                try:
+                    runtime_table_rule = generate_table_selection_rule(
+                        question=self.chat_question.question,
+                        current_time=self._get_effective_current_time(),
+                        schema=self.chat_question.db_schema,
+                    )
+                except Exception as e:
+                    _async_log_util.debug(f"[表选择规则] SQL阶段时效判定失败: {e}")
+            if runtime_table_rule and runtime_table_rule.get("status") == "no_data":
+                hint_message = runtime_table_rule.get("message") or "当前暂无想要查询的数据"
+                error_msg = orjson.dumps({"success": False, "message": hint_message}).decode()
+                trace_no_data = self._trace_start(
+                    node_key="sql_generation",
+                    node_name="SQL生成",
+                    input_payload={
+                        "messages": [{"type": "human", "content": self.chat_question.question}],
+                        "blocked": "table_rule_no_data",
+                        "table_selection_info": runtime_table_rule,
+                    },
+                )
+                self.current_logs[OperationEnum.GENERATE_SQL] = start_log(
+                    session=self.session,
+                    ai_modal_id=self.chat_question.ai_modal_id,
+                    ai_modal_name=self.chat_question.ai_modal_name,
+                    operate=OperationEnum.GENERATE_SQL,
+                    record_id=self.record.id,
+                    full_message=[
+                        {"type": "human", "content": self.chat_question.question},
+                        {"type": "ai", "content": error_msg},
+                    ],
+                )
+                self.current_logs[OperationEnum.GENERATE_SQL] = end_log(
+                    session=self.session,
+                    log=self.current_logs[OperationEnum.GENERATE_SQL],
+                    full_message=[
+                        {"type": "human", "content": self.chat_question.question},
+                        {"type": "ai", "content": error_msg},
+                    ],
+                    reasoning_content="",
+                    token_usage={},
+                )
+                self.record = save_sql_answer(
+                    session=self.session,
+                    record_id=self.record.id,
+                    current_user=self.current_user,
+                    answer=orjson.dumps({"content": error_msg}).decode(),
+                )
+                self._trace_end(
+                    trace_no_data,
+                    output_payload={"result": error_msg, "reasoning_content": hint_message},
+                )
+                if in_chat:
+                    yield 'data:' + orjson.dumps({
+                        "content": hint_message,
+                        "reasoning_content": "",
+                        "type": "analysis-result",
+                    }).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({
+                        "type": "step-complete",
+                        "step": "sql-generation",
+                        "step_name": "SQL生成",
+                        "description": "未生成SQL（该时点数据尚未入库）",
+                        "result": {"message": hint_message},
+                    }).decode() + '\n\n'
+                    yield 'data:' + orjson.dumps({"type": "finish"}).decode() + '\n\n'
+                if not stream:
+                    json_result["success"] = False
+                    json_result["message"] = hint_message
+                    yield json_result
+                return
 
             cqs_rej = self._cqs_reject_message_if_requested_month_beyond_data()
             if cqs_rej:

@@ -260,16 +260,23 @@ def generate_table_selection_rule(
 
     available_at = _available_at_for_yearly_table(year)
     if current_dt < available_at:
+        # 特殊规则：在该年度年报尚未可查前，按该年12月月报口径返回数据（不报 no_data）
+        rule_text = (
+            f"<rule>\n"
+            f"用户查询的是 {year}年年度指标数据，但当前尚未到年报表 dws_cgn_jq_zbval_year 的可查询时点。"
+            f"必须改用月报表 dws_cgn_jq_zbval_month，并固定查询 {year}年12月 数据"
+            f"（例如：年份字段 = {year} AND 月份字段 = 12）。\n"
+            f"</rule>"
+        )
         return {
-            "status": "no_data",
-            "message": (
-                f"你查询的时间为 {year}年，当前尚未到该批次可查询时间。"
-                f"年报/决算表 `dws_cgn_jq_zbval_year` 需在 {available_at.year}年{available_at.month}月{available_at.day}日 00:00 之后才可查询。"
+            "status": "rule",
+            "rule_text": rule_text,
+            "table_type": "month",
+            "table_name": "dws_cgn_jq_zbval_month",
+            "data_source_hint": (
+                f"> [!TIP]\n> **数据来源提示**：当前尚未到 {year} 年年报可查询时点，"
+                f"本次按月报快报表（`dws_cgn_jq_zbval_month`）中 {year}年12月 数据口径返回。"
             ),
-            "rule_text": None,
-            "table_type": None,
-            "table_name": None,
-            "data_source_hint": None,
             "year": year,
         }
 

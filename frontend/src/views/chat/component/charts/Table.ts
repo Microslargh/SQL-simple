@@ -156,7 +156,7 @@ export class Table extends BaseChart {
     }
 
     // 列名包含金额/税费/收入等，视为指标列，应参与汇总
-    const metricKeywords = ['税费', '金额', '亿元', '万元', '收入', '成本', '利润', '资产', '负债']
+    const metricKeywords = ['税费', '金额', '亿元', '万元', '收入', '成本', '利润', '资产', '负债', '规模','元']
     if (metricKeywords.some(kw => colName.includes(kw))) {
       return false
     }

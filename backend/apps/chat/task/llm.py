@@ -1022,7 +1022,7 @@ class LLMService:
             if raw_data and total_rows > 0 and (not summary or not summary.get("has_numeric_breakdown")):
                 keys_preview = list((raw_data[0] or {}).keys())[:8] if raw_data else []
                 _async_log_util.info(f"[数据分析] 预分析未命中，将传原始数据。行数={total_rows}, 列名={keys_preview}")
-            ANALYSIS_DATA_ROW_LIMIT = 8000
+            ANALYSIS_DATA_ROW_LIMIT = int(getattr(settings, "ANALYSIS_DATA_ROW_LIMIT", 2000) or 2000)
             if total_rows > ANALYSIS_DATA_ROW_LIMIT:
                 self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
                 _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析")
@@ -1067,6 +1067,12 @@ class LLMService:
 
         # 合并所有 custom_prompt 部分
         self.chat_question.custom_prompt = "\n\n".join(custom_prompt_parts) if custom_prompt_parts else ""
+        _async_log_util.info(
+            f"[数据分析] 输入规模: question={len(self.chat_question.question or '')}, "
+            f"fields={len(self.chat_question.fields or '')}, data={len(self.chat_question.data or '')}, "
+            f"summary={len(self.chat_question.data_summary or '')}, sql={len(self.chat_question.sql or '')}, "
+            f"rows={self.chat_question.data_total_rows or '0'}"
+        )
 
         analysis_msg.append(SystemMessage(content=self.chat_question.analysis_sys_question()))
         analysis_msg.append(HumanMessage(content=self.chat_question.analysis_user_question()))
@@ -1085,30 +1091,89 @@ class LLMService:
         full_analysis_text = ''
         token_usage = {}
         res = process_stream(self.llm.stream(analysis_msg), token_usage)
+        yield {"type": "analysis-keepalive", "content": "", "reasoning_content": "", "stage": "draft_start"}
+        draft_chunk_count = 0
+        draft_started_at = datetime.now()
         for chunk in res:
+            draft_chunk_count += 1
             if chunk.get('content'):
                 full_analysis_text += chunk.get('content')
             if chunk.get('reasoning_content'):
                 full_thinking_text += chunk.get('reasoning_content')
+            # 初稿实时透传，避免前端长时间无内容导致中间层空闲断流
+            if chunk.get('content') or chunk.get('reasoning_content'):
+                yield {
+                    "type": "analysis-result",
+                    "content": chunk.get('content') or "",
+                    "reasoning_content": chunk.get('reasoning_content') or "",
+                    "phase": "draft",
+                }
+            # 保活：即使前端不展示该事件，也能持续收到流数据，避免网关空闲超时断流
+            if draft_chunk_count % 20 == 0:
+                yield {"type": "analysis-keepalive", "content": "", "reasoning_content": "", "stage": "draft_stream"}
+        _async_log_util.info(
+            f"[数据分析] 初稿生成完成: chars={len(full_analysis_text)}, chunks={draft_chunk_count}, "
+            f"elapsed_ms={(datetime.now() - draft_started_at).total_seconds() * 1000:.0f}"
+        )
 
         # 反思与修正：基于真实数据对初稿做 Fact-check & Sanitization，避免幻觉/提示词泄露
-        try:
-            full_analysis_text = self._reflect_and_correct_analysis(
-                draft=full_analysis_text,
-                question=self.chat_question.question or "",
-                sql=self.chat_question.sql or "",
-                fields=self.chat_question.fields or "",
-                data=self.chat_question.data or "[]",
-                data_total_rows=self.chat_question.data_total_rows or "0",
-                data_summary=self.chat_question.data_summary or "",
+        reflection_enabled = bool(getattr(settings, "ANALYSIS_REFLECTION_ENABLED", True))
+        reflection_timeout = float(getattr(settings, "ANALYSIS_REFLECTION_TIMEOUT", 25) or 25)
+        if reflection_enabled and full_analysis_text.strip():
+            reflection_started_at = datetime.now()
+            reflection_input_draft = full_analysis_text
+            reflection_future = executor.submit(
+                self._reflect_and_correct_analysis,
+                full_analysis_text,
+                self.chat_question.question or "",
+                self.chat_question.sql or "",
+                self.chat_question.fields or "",
+                self.chat_question.data or "[]",
+                self.chat_question.data_total_rows or "0",
+                self.chat_question.data_summary or "",
             )
-        except Exception as e:
-            _async_log_util.warning(f"[分析反思] 反思节点异常，已跳过: {e}")
+            reflection_done = False
+            waited = 0.0
+            heartbeat_interval = 2.0
+            while waited < reflection_timeout:
+                try:
+                    reflected = reflection_future.result(timeout=heartbeat_interval)
+                    full_analysis_text = reflected
+                    reflection_done = True
+                    break
+                except concurrent.futures.TimeoutError:
+                    waited += heartbeat_interval
+                    yield {
+                        "type": "analysis-keepalive",
+                        "content": "",
+                        "reasoning_content": "",
+                        "stage": "reflection_wait",
+                        "elapsed_s": int(waited),
+                    }
+                except Exception as e:
+                    _async_log_util.warning(f"[分析反思] 反思节点异常，已跳过: {e}")
+                    reflection_done = True
+                    break
 
-        # 流式输出修正后的最终稿：按句或按段分块 yield，前端可逐块追加展示
-        for chunk in _stream_text_chunks(full_analysis_text, chunk_size=80):
-            if chunk:
-                yield {"content": chunk, "reasoning_content": ""}
+            if not reflection_done:
+                _async_log_util.warning(
+                    f"[分析反思] 反思超时，已降级使用初稿: timeout={reflection_timeout}s"
+                )
+                full_analysis_text = reflection_input_draft
+            _async_log_util.info(
+                f"[分析反思] 结束: enabled={reflection_enabled}, changed={full_analysis_text != reflection_input_draft}, "
+                f"elapsed_ms={(datetime.now() - reflection_started_at).total_seconds() * 1000:.0f}"
+            )
+        else:
+            _async_log_util.info("[分析反思] 已跳过: 开关关闭或初稿为空")
+
+        # 反思完成后发送最终稿覆盖事件，前端应以该稿替换初稿，避免重复追加
+        yield {
+            "type": "analysis-replace",
+            "content": full_analysis_text,
+            "reasoning_content": "",
+            "phase": "final",
+        }
 
         analysis_msg.append(AIMessage(full_analysis_text))
 

@@ -296,6 +296,10 @@ const sendMessage = async () => {
                 _currentChat.value.records[index.value].analysis = analysis_answer
                 _currentChat.value.records[index.value].analysis_thinking = analysis_answer_thinking
                 break
+              case 'analysis-replace':
+                analysis_answer = data.content || ''
+                _currentChat.value.records[index.value].analysis = analysis_answer
+                break
               case 'analysis_finish':
                 // 分析完成，但继续等待图表
                 break

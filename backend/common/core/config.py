@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     DEFAULT_PWD: str = Field(default="123456", description="默认密码")
     ASSISTANT_TOKEN_KEY: str = "X-SQLBOT-ASSISTANT-TOKEN"
 
+    # 数字员工监控平台等系统调用 /api/v1/monitor/* 时的专用鉴权密钥
+    # 未配置时监控接口返回 503
+    MONITOR_API_KEY: str = Field(default="", description="监控开放 API 密钥，未配置则监控接口返回 503")
+
     CACHE_TYPE: Literal["redis", "memory", "None"] = "memory"
     CACHE_REDIS_URL: str | None = None  # Redis URL, e.g., "redis://[[username]:[password]]@localhost:6379/0"
 

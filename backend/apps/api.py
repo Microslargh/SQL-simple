@@ -7,6 +7,7 @@ from apps.datasource.api import datasource, table_relation
 from apps.mcp import mcp
 from apps.system.api import login, user, aimodel, workspace, assistant, callback, oauth2, auth, custom_prompt, error_query_record
 from apps.terminology.api import terminology
+from apps.monitor.api.monitor_qa import router as monitor_qa_router
 
 api_router = APIRouter()
 api_router.include_router(login.router)
@@ -23,6 +24,7 @@ api_router.include_router(error_query_record.router)
 api_router.include_router(data_training.router)
 api_router.include_router(datasource.router)
 api_router.include_router(chat.router)
+api_router.include_router(monitor_qa_router)
 api_router.include_router(dashboard_api.router)
 api_router.include_router(mcp.router)
 api_router.include_router(table_relation.router)

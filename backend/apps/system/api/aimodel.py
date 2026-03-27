@@ -15,16 +15,26 @@ from common.utils.utils import SQLBotLogUtil, prepare_model_arg
 
 router = APIRouter(tags=["system/aimodel"], prefix="/system/aimodel")
 
+
+def _normalize_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip()
+
+
 @router.post("/status")
 async def check_llm(info: AiModelCreator, trans: Trans):
     async def generate():
         try:
+            normalized_model_name = _normalize_text(info.base_model) or ""
+            normalized_api_domain = _normalize_text(info.api_domain)
+            normalized_api_key = _normalize_text(info.api_key)
             additional_params = {item.key: prepare_model_arg(item.val) for item in info.config_list if item.key and item.val}
             config = LLMConfig(
                 model_type="openai" if info.protocol == 1 else "vllm",
-                model_name=info.base_model,
-                api_key=info.api_key,
-                api_base_url=info.api_domain,
+                model_name=normalized_model_name,
+                api_key=normalized_api_key,
+                api_base_url=normalized_api_domain,
                 additional_params=additional_params,
             )
             llm_instance = LLMFactory.create_llm(config)
@@ -118,6 +128,8 @@ async def add_model(
         creator: AiModelCreator
 ):
     data = creator.model_dump(exclude_unset=True)
+    data["name"] = (data.get("name") or "").strip()
+    data["base_model"] = (data.get("base_model") or "").strip()
     data["config"] = json.dumps([item.model_dump(exclude_unset=True) for item in creator.config_list])
     data.pop("config_list", None)
     detail = AiModelDetail.model_validate(data)
@@ -135,6 +147,8 @@ async def update_model(
 ):
     id = int(editor.id)
     data = editor.model_dump(exclude_unset=True)
+    data["name"] = (data.get("name") or "").strip()
+    data["base_model"] = (data.get("base_model") or "").strip()
     data["config"] = json.dumps([item.model_dump(exclude_unset=True) for item in editor.config_list])
     data.pop("config_list", None)
     db_model = session.get(AiModelDetail, id)

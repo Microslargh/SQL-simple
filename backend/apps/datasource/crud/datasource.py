@@ -415,8 +415,14 @@ def get_table_obj_by_ds(session: SessionDep, current_user: CurrentUser, ds: Core
 
     # get all field
     table_ids = [table.id for table in tables]
+    # 保证字段顺序稳定：优先按 field_index（建模时记录的字段序）排序，再按 id 兜底
     all_fields = session.query(CoreField).filter(
-        and_(CoreField.table_id.in_(table_ids), CoreField.checked == True)).all()
+        and_(CoreField.table_id.in_(table_ids), CoreField.checked == True)
+    ).order_by(
+        CoreField.table_id.asc(),
+        CoreField.field_index.asc(),
+        CoreField.id.asc()
+    ).all()
     # build dict
     fields_dict = {}
     for field in all_fields:

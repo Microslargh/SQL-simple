@@ -163,8 +163,8 @@ async def get_default_config() -> LLMConfig:
         return LLMConfig(
             model_id=db_model.id,
             model_type="openai" if db_model.protocol == 1 else "vllm",
-            model_name=db_model.base_model,
-            api_key=db_model.api_key,
-            api_base_url=db_model.api_domain,
+            model_name=(db_model.base_model or "").strip(),
+            api_key=(db_model.api_key or "").strip() if db_model.api_key else db_model.api_key,
+            api_base_url=(db_model.api_domain or "").strip() if db_model.api_domain else db_model.api_domain,
             additional_params=additional_params,
         )

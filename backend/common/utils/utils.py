@@ -58,6 +58,7 @@ def extract_nested_json(text):
     stack = []
     start_index = -1
     results = []
+    dict_results = []
 
     for i, char in enumerate(text):
         if char in '{[':
@@ -70,12 +71,17 @@ def extract_nested_json(text):
                 if not stack:  # 栈空时截取完整JSON
                     json_str = text[start_index:i + 1]
                     try:
-                        orjson.loads(json_str)  # 验证有效性
+                        parsed = orjson.loads(json_str)  # 验证有效性
                         results.append(json_str)
+                        if isinstance(parsed, dict):
+                            dict_results.append(json_str)
                     except:
                         pass
             else:
                 stack = []  # 括号不匹配则重置
+    # 优先返回 JSON 对象，避免误选到 [] 导致后续 data.get 报错
+    if len(dict_results) > 0 and dict_results[0]:
+        return dict_results[0]
     if len(results) > 0 and results[0]:
         return results[0]
     return None

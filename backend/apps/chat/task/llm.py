@@ -273,6 +273,95 @@ class LLMService:
         """获取用于 prompt 的 current_time（不再依赖固定表名推断快照时点）。"""
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+    @staticmethod
+    def _sql_json_response_format() -> dict:
+        """SQL 生成结构化输出约束：优先要求模型只返回可解析 JSON。"""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sqlbot_sql_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "success": {"type": "boolean"},
+                        "sql": {"type": "string"},
+                        "tables": {"type": "array", "items": {"type": "string"}},
+                        "chart-type": {"type": "string"},
+                        "message": {"type": "string"},
+                    },
+                    "required": ["success"],
+                    "additionalProperties": True
+                }
+            }
+        }
+
+    @staticmethod
+    def _chart_json_response_format() -> dict:
+        """图表生成结构化输出约束：至少保证返回对象并包含 type。"""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sqlbot_chart_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "axis": {"type": "object"},
+                        "columns": {"type": "array"},
+                        "name": {"type": "string"},
+                        "data": {"type": "array"},
+                    },
+                    "required": ["type"],
+                    "additionalProperties": True
+                }
+            }
+        }
+
+    @staticmethod
+    def _double_check_response_format() -> dict:
+        """快速模板二次校验结构化输出：避免模型混合输出 True/False。"""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sqlbot_double_check_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "matched": {"type": "boolean"}
+                    },
+                    "required": ["matched"],
+                    "additionalProperties": False
+                }
+            }
+        }
+
+    def _stream_with_response_format(
+            self,
+            messages: List[Union[BaseMessage, dict[str, Any]]],
+            response_format: Optional[dict],
+            log_prefix: str
+    ):
+        """
+        优先使用 response_format 约束模型返回 JSON；
+        若服务端不兼容或调用失败，自动回退到普通 stream。
+        """
+        if response_format:
+            try:
+                structured_llm = self.llm.bind(response_format=response_format)
+                _async_log_util.info(f"[{log_prefix}] 已启用 response_format=json_schema")
+                for chunk in structured_llm.stream(messages):
+                    yield chunk
+                return
+            except Exception as e:
+                _async_log_util.warning(f"[{log_prefix}] json_schema 调用失败，回退普通模式: {str(e)}")
+
+        for chunk in self.llm.stream(messages):
+            yield chunk
+
     def init_messages(self):
         """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
@@ -1429,7 +1518,14 @@ class LLMService:
         full_thinking_text = ''
         full_sql_text = ''
         token_usage = {}
-        res = process_stream(self.llm.stream(self.sql_message), token_usage)
+        res = process_stream(
+            self._stream_with_response_format(
+                self.sql_message,
+                self._sql_json_response_format(),
+                "SQL结构化输出"
+            ),
+            token_usage
+        )
         for chunk in res:
             if chunk.get('content'):
                 full_sql_text += chunk.get('content')
@@ -1563,13 +1659,39 @@ class LLMService:
             f"[快速模板匹配] 二次校验入参 - 模板ID: {template_id}, 模板问题: {template_question}, 当前用户问题: {(self.chat_question.question or '')[:120]}"
         )
         token_usage = {}
-        res = process_stream(self.llm.stream(double_check_messages), token_usage)
+        res = process_stream(
+            self._stream_with_response_format(
+                double_check_messages,
+                self._double_check_response_format(),
+                "快速模板二次校验结构化输出"
+            ),
+            token_usage
+        )
 
         content_list = []
         for chunk in res:
             if chunk.get('content'):
-                content_list += chunk.get('content')
+                content_list.append(chunk.get('content'))
         content_str = "".join(content_list)
+
+        # 优先解析结构化输出：{"matched": true/false}
+        try:
+            dc_json_str = extract_nested_json(content_str)
+            if dc_json_str:
+                dc_data = orjson.loads(dc_json_str)
+                if isinstance(dc_data, dict) and isinstance(dc_data.get("matched"), bool):
+                    matched = dc_data.get("matched")
+                    self._trace_end(
+                        trace,
+                        output_payload={
+                            "matched": matched,
+                            "response_text": content_str[:800],
+                            "decision_mode": "json_schema"
+                        },
+                    )
+                    return matched
+        except Exception:
+            pass
 
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("=" * 20 + " generate_straight_sql_info " + "=" * 20 + "\n")
@@ -1662,7 +1784,14 @@ class LLMService:
 
 
         token_usage = {}
-        res = process_stream(self.llm.stream(self.straight_messages), token_usage)
+        res = process_stream(
+            self._stream_with_response_format(
+                self.straight_messages,
+                self._sql_json_response_format(),
+                "快速模板SQL结构化输出"
+            ),
+            token_usage
+        )
         full_text = ""
         full_reasoning_text = ""
         for chunk in res:
@@ -2057,7 +2186,14 @@ class LLMService:
         full_thinking_text = ''
         full_chart_text = ''
         token_usage = {}
-        res = process_stream(self.llm.stream(self.chart_message), token_usage)
+        res = process_stream(
+            self._stream_with_response_format(
+                self.chart_message,
+                self._chart_json_response_format(),
+                "图表结构化输出"
+            ),
+            token_usage
+        )
         for chunk in res:
             if chunk.get('content'):
                 full_chart_text += chunk.get('content')
@@ -2104,6 +2240,14 @@ class LLMService:
         data: dict
         try:
             data = orjson.loads(json_str)
+            if isinstance(data, list):
+                # 兼容少数模型返回数组包装，尝试提取首个合法对象
+                candidate = next((item for item in data if isinstance(item, dict)), None)
+                if candidate is None:
+                    raise SingleMessageError("Model response is a JSON list, not a SQL result object")
+                data = candidate
+            if not isinstance(data, dict):
+                raise SingleMessageError("Model response JSON is not an object")
 
             if data.get('success', False):
                 sql = data.get('sql', '')

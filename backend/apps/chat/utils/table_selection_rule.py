@@ -16,12 +16,18 @@ TARGET_INDICATORS = [
     "经营情况",
     "一利五率",
     "EVA",
-    "国有资本保值增值率",
+    "经济增加值",
     "两金构成",
     "亏损",
     "负债",
     "利润",
     "收入",
+    "营业收入",
+    "净资产",
+    "所有者权益",
+    "股东权益",
+    "资产总计",
+    "资产",
     "担保",
 ]
 
@@ -82,6 +88,18 @@ def _extract_year_month(question: str) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
+def _extract_all_years(question: str) -> list[int]:
+    """
+    提取问题中出现的所有年份（去重后按升序返回）。
+    仅识别 2000-2100 的四位年份。
+    """
+    if not question:
+        return []
+    years = [int(y) for y in re.findall(r'(?<!\d)(20\d{2}|2100)(?!\d)', question)]
+    valid = sorted({y for y in years if 2000 <= y <= 2100})
+    return valid
+
+
 def _contains_target_indicator(question: str) -> bool:
     """检查问题是否包含目标指标关键词"""
     question_lower = question.lower()
@@ -133,7 +151,7 @@ def generate_table_selection_rule(
         - status: "no_data" | "rule" - "no_data" 表示当前暂无数据或查询时间超出数据范围，"rule" 表示需要生成规则
         - message: 可选，当 status="no_data" 时的用户可见提示（如「当前数据库仅有2026年2月及以前的数据」）
         - rule_text: 规则文本（当 status="rule" 时）
-        - table_type: "year" | "month" - 使用的表类型（当 status="rule" 时）
+        - table_type: "year" | "month" | "mixed" - 使用的表类型（当 status="rule" 时）
         - table_name: 表名（当 status="rule" 时）
         - data_source_hint: 数据来源提示文本（用于分析时的温馨提示）
     """
@@ -161,6 +179,7 @@ def generate_table_selection_rule(
         .replace("去年", f"{current_year - 1}年")
     )
     year, month = _extract_year_month(q_normalized)
+    all_years = _extract_all_years(q_normalized)
     if year is None:
         return None
 
@@ -242,6 +261,52 @@ def generate_table_selection_rule(
     # 仅在 jq 指标意图下生效，避免影响其它按天更新表
     if domain != "jq":
         return None
+
+    # 多年份年度问题：同一问句内对每个年份独立判定数据来源。
+    # 典型场景：如同时问 2024年 与 2025年，且当前时间未到 2026-04-26，
+    # 则 2024 用年报表、2025 用 2025年12月月报口径。
+    if month is None and len(all_years) >= 2:
+        yearly_years: list[int] = []
+        monthly_dec_years: list[int] = []
+        source_desc_parts: list[str] = []
+        for y in all_years:
+            if current_dt < _available_at_for_yearly_table(y):
+                monthly_dec_years.append(y)
+                source_desc_parts.append(f"{y}年->月报12月（dws_cgn_jq_zbval_month）")
+            else:
+                yearly_years.append(y)
+                source_desc_parts.append(f"{y}年->年报（dws_cgn_jq_zbval_year）")
+
+        yearly_text = "、".join(str(y) for y in yearly_years) if yearly_years else "无"
+        monthly_text = "、".join(str(y) for y in monthly_dec_years) if monthly_dec_years else "无"
+        source_desc = "；".join(source_desc_parts)
+
+        rule_text = (
+            f"<rule>\n"
+            f"用户问题包含多个年份（{', '.join(str(y) for y in all_years)}）的年度指标查询，"
+            f"必须按每个年份的可查询时点独立选表，严禁所有年份共用同一张表。\n"
+            f"其中：可直接用年报表 dws_cgn_jq_zbval_year 的年份为：{yearly_text}；"
+            f"尚未到年报可查时点、需改用月报表 dws_cgn_jq_zbval_month 且固定取12月的年份为：{monthly_text}。\n"
+            f"生成 SQL 时应按“年份”分别取数并合并（可使用 UNION ALL），"
+            f"最终输出需保留年份维度，确保能正确回答“分别是多少”。\n"
+            f"当同一 SQL 同时使用 dws_cgn_jq_zbval_year 与 dws_cgn_jq_zbval_month 时，"
+            f"禁止两张表复用同一个 zb_title 字面值；必须按各表实际口径分别匹配指标名称。"
+            f"若存在“本年数/本年累计数”等后缀差异，应对两张表分别写各自可命中的候选条件。\n"
+            f"</rule>"
+        )
+        return {
+            "status": "rule",
+            "rule_text": rule_text,
+            "table_type": "mixed",
+            "table_name": "dws_cgn_jq_zbval_year,dws_cgn_jq_zbval_month",
+            "data_source_hint": (
+                "> [!TIP]\n"
+                f"> **数据来源提示**：多年份年度查询已按年份独立判定数据来源：{source_desc}。"
+            ),
+            "years": all_years,
+            "yearly_years": yearly_years,
+            "monthly_dec_years": monthly_dec_years,
+        }
 
     if month is not None:
         rule_text = (

@@ -64,6 +64,11 @@ from apps.chat.utils.entity_type_filter import filter_training_data_by_entity_ty
 from apps.chat.utils.implicit_param_extract import extract_implicit_replacements, apply_implicit_replacements
 from apps.chat.utils.business_rules import apply_business_rules
 from apps.chat.utils.sql_generation_audit_rules import collect_sql_generation_audit_prompt
+from apps.chat.utils.jq_zb_title_mapping import (
+    get_jq_zb_title_candidates,
+    get_special_month_code,
+    SPECIAL_MONTH_ALL_CODES,
+)
 from common.core.config import settings
 from common.core.db import engine
 from common.core.deps import CurrentAssistant, CurrentUser
@@ -3147,9 +3152,156 @@ class LLMService:
             sql = re.sub(r"\bsys_datatime\s+AS\s+'year'", "LEFT(sys_datatime, 4) AS 'year'", sql, flags=re.IGNORECASE)
         return sql
 
+    @staticmethod
+    def _normalize_jq_zb_title_core(title: str) -> str:
+        """抽取 zb_title 的语义核心（去掉常见时态/累计后缀），用于跨年/月表对齐。"""
+        t = (title or "").strip()
+        if not t:
+            return t
+        t = re.sub(r'\s+', '', t)
+        # 仅处理标题尾部的常见口径后缀，保留主指标语义
+        tail_patterns = [
+            r'[_\-]?(本年累计数|本期累计数|本年数|本期数|当期数|累计数)$',
+            r'[_\-]?(本月数|本月累计数)$',
+        ]
+        for p in tail_patterns:
+            t = re.sub(p, '', t)
+        return t.strip('_- ')
+
+    @classmethod
+    def _build_jq_zb_title_candidates(cls, raw_title: str, table_type: str) -> list[str]:
+        """
+        优先使用显式映射词典；未命中时回退到语义后缀推断。
+        table_type: "year" | "month"
+        """
+        raw = (raw_title or "").strip()
+        if not raw:
+            return []
+        mapped = get_jq_zb_title_candidates(raw, table_type)
+        if mapped:
+            return mapped
+        core = cls._normalize_jq_zb_title_core(raw)
+        if not core:
+            core = raw
+
+        if table_type == "year":
+            suffixes = ["_本年数", "本年数", "_本期数", "本期数", "_当期数", "当期数"]
+        else:
+            suffixes = ["_本年累计数", "本年累计数", "_本期累计数", "本期累计数", "_累计数", "累计数"]
+
+        candidates: list[str] = [raw]
+        for s in suffixes:
+            if s.startswith("_"):
+                candidates.append(f"{core}{s}")
+            else:
+                candidates.append(f"{core}{s}")
+                candidates.append(f"{core}_{s}")
+
+        # 去重保序
+        seen: set[str] = set()
+        dedup: list[str] = []
+        for c in candidates:
+            cc = c.strip()
+            if not cc or cc in seen:
+                continue
+            seen.add(cc)
+            dedup.append(cc)
+        return dedup
+
+    @staticmethod
+    def _infer_jq_zb_table_context(sql_lower: str, pos: int) -> Optional[str]:
+        """根据当前位置向前回看最近 FROM/JOIN 表名，推断当前 zb_title 条件属于 year 还是 month 表。"""
+        year_tag = "dws_cgn_jq_zbval_year"
+        month_tag = "dws_cgn_jq_zbval_month"
+        y_idx = sql_lower.rfind(year_tag, 0, pos)
+        m_idx = sql_lower.rfind(month_tag, 0, pos)
+        if y_idx == -1 and m_idx == -1:
+            return None
+        return "year" if y_idx > m_idx else "month"
+
+    def _rewrite_jq_zb_title_for_mixed_tables(self, sql: str) -> str:
+        """
+        当同一 SQL 同时使用 jq 年报/月报两张表时，
+        将 zb_title='xxx' 自动扩展为按表口径候选 IN(...)，降低跨表 literal 复用导致的漏数。
+        """
+        sl = (sql or "").lower()
+        if "dws_cgn_jq_zbval_year" not in sl or "dws_cgn_jq_zbval_month" not in sl:
+            return sql
+
+        pattern = re.compile(r'(?P<col>"?zb_title"?)\s*=\s*(?P<q>[\'"])(?P<title>.*?)(?P=q)', re.IGNORECASE)
+        replaced = 0
+
+        def _repl(m: re.Match) -> str:
+            nonlocal replaced
+            table_type = self._infer_jq_zb_table_context(sl, m.start())
+            if table_type not in ("year", "month"):
+                return m.group(0)
+            title = (m.group("title") or "").strip()
+            # 已经是模糊或变量替换场景，不做改写
+            if not title or "%" in title:
+                return m.group(0)
+            candidates = self._build_jq_zb_title_candidates(title, table_type)
+            if len(candidates) <= 1:
+                return m.group(0)
+            vals = ", ".join("'" + c.replace("'", "''") + "'" for c in candidates)
+            replaced += 1
+            return f"{m.group('col')} IN ({vals})"
+
+        new_sql = pattern.sub(_repl, sql)
+        if replaced > 0:
+            _async_log_util.info(f"[jq_zbval] 已按年/月表口径扩展 zb_title 候选条件，替换 {replaced} 处")
+        return new_sql
+
+    def _rewrite_jq_month_special_zb_name(self, sql: str) -> str:
+        """
+        月报中 3 个特殊指标（营业收入/资产总计/利润总额）存在境内/境外同 title 不同 code。
+        若问题未明确“境外/海外”，默认强制境内 code；明确时切到境外 code。
+        """
+        if "dws_cgn_jq_zbval_month" not in (sql or "").lower():
+            return sql
+
+        month_pos = (sql or "").lower().find("dws_cgn_jq_zbval_month")
+        month_sql = sql[month_pos:] if month_pos >= 0 else sql
+        title_match = re.search(
+            r'("?zb_title"?)\s*=\s*([\'"])(?P<title>.*?)(\2)',
+            month_sql,
+            flags=re.IGNORECASE
+        )
+        month_title = (title_match.group("title") if title_match else "") or ""
+        target_code = get_special_month_code(self.chat_question.question or "", month_title)
+        if not target_code:
+            return sql
+
+        # 1) 若 SQL 已写了特殊指标 code（可能写错口径），统一改为目标 code
+        special_codes_re = "|".join(re.escape(c) for c in sorted(SPECIAL_MONTH_ALL_CODES))
+        code_eq_pattern = re.compile(
+            rf'("?zb_name"?)\s*=\s*([\'"])({special_codes_re})\2',
+            re.IGNORECASE
+        )
+        sql2 = code_eq_pattern.sub(lambda m: f'{m.group(1)} = \'{target_code}\'', sql)
+
+        # 2) 若 month 分支没有 zb_name 条件，则补一条，避免同 title 命中到错误口径
+        if re.search(r'("?zb_name"?)\s*=', sql2, flags=re.IGNORECASE):
+            if sql2 != sql:
+                _async_log_util.info(f"[jq_zbval] 月报特殊指标 code 已按口径改写为 {target_code}")
+            return sql2
+
+        injected = re.sub(
+            r'(\bFROM\s+"?default"?\."?dws_cgn_jq_zbval_month"?\s*\n\s*WHERE\s+)',
+            r'\1"zb_name" = \'' + target_code + r'\' AND ',
+            sql2,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if injected != sql2:
+            _async_log_util.info(f"[jq_zbval] 月报分支已注入特殊指标 code 约束: {target_code}")
+        return injected
+
     def check_save_sql(self, res: str) -> str:
         sql, *_ = self.check_sql(res=res)
         sql = self._rewrite_jq_zbval_year_sys_datatime(sql)
+        sql = self._rewrite_jq_zb_title_for_mixed_tables(sql)
+        sql = self._rewrite_jq_month_special_zb_name(sql)
         sql = apply_business_rules(sql)
         sql, cqs_notice = self._cap_cqs_sql_snapshot_time(sql)
         self._cqs_snapshot_time_notice = cqs_notice

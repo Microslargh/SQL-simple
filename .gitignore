@@ -73,7 +73,7 @@ file_trans/
 *.njsproj
 *.sln
 *.sw?
-
+.qoder/
 # Logs
 logs/
 *.log
@@ -82,7 +82,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-
+docs/
 # Database
 data/postgresql/
 *.db

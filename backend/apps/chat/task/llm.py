@@ -57,8 +57,8 @@ from apps.datasource.models.datasource import CoreDatasource
 from apps.db.db import exec_sql, get_version, check_connection
 from apps.system.crud.assistant import AssistantOutDs, AssistantOutDsFactory, get_assistant_ds
 from apps.system.schemas.system_schema import AssistantOutDsSchema
-from apps.terminology.curd.terminology import get_terminology_template, get_terminology_template_with_data
-from apps.template.generate_chart.generator import get_base_data_training_template
+from apps.terminology.curd.terminology import get_terminology_template, get_terminology_template_with_data, to_xml_string as terminology_to_xml_string
+from apps.template.generate_chart.generator import get_base_data_training_template, get_base_terminology_template
 from apps.template.question_enhance.generator import get_question_enhance_template
 from apps.chat.utils.entity_type_filter import filter_training_data_by_entity_type, infer_entity_type, ENTITY_REGION, ENTITY_COMPANY_INDUSTRY
 from apps.chat.utils.implicit_param_extract import extract_implicit_replacements, apply_implicit_replacements
@@ -531,11 +531,445 @@ class LLMService:
             f"`dws_cqs_enterprise_query_view_full` 需在 **{available_at.year}年{available_at.month:02d}月{available_at.day:02d}日 00:00** 后才可查询。"
         )
 
+    @staticmethod
+    def _append_prompt_section_unique(sections: list[str], section: Optional[str]) -> None:
+        """按规范化文本去重追加 prompt 片段，避免重复注入导致冗余。"""
+        if not section:
+            return
+        text = section.strip()
+        if not text:
+            return
+        normalized = re.sub(r"\s+", " ", text)
+        for s in sections:
+            if re.sub(r"\s+", " ", s.strip()) == normalized:
+                return
+        sections.append(text)
+
+    @staticmethod
+    def _tokenize_for_relevance(text: str) -> list[str]:
+        if not text:
+            return []
+        cjk_terms = re.findall(r'[\u4e00-\u9fff]{2,}', text)
+        en_terms = re.findall(r'[A-Za-z0-9_]{2,}', text.lower())
+        tokens = cjk_terms + en_terms
+        # 去重保序
+        return list(dict.fromkeys([t.strip() for t in tokens if t and t.strip()]))
+
+    def _relevance_score(self, query: str, candidate: str) -> int:
+        if not query or not candidate:
+            return 0
+        q_tokens = self._tokenize_for_relevance(query)
+        if not q_tokens:
+            return 0
+        cand = candidate.lower()
+        score = 0
+        for t in q_tokens:
+            if len(t) >= 4 and t.lower() in cand:
+                score += 3
+            elif t.lower() in cand:
+                score += 1
+        return score
+
+    def _filter_topk_items_by_relevance(
+            self,
+            query: str,
+            items: list[dict],
+            text_builder,
+            top_k: int,
+            min_score: int = 1
+    ) -> list[dict]:
+        if not items:
+            return []
+        scored = []
+        for item in items:
+            try:
+                text = text_builder(item) or ""
+                score = self._relevance_score(query, text)
+                scored.append((score, item))
+            except Exception:
+                scored.append((0, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        picked = [it for s, it in scored if s >= min_score][:top_k]
+        # 保底：避免筛空导致能力退化
+        if not picked:
+            return items[:top_k]
+        return picked
+
+    def _split_custom_prompt_sections(self, prompt: str) -> list[str]:
+        """将 custom prompt 切分为可独立评分的段落。"""
+        text = (prompt or "").strip()
+        if not text:
+            return []
+        # 优先按 <rule> 分段
+        rule_blocks = re.findall(r"<rule>[\s\S]*?</rule>", text, flags=re.IGNORECASE)
+        if rule_blocks:
+            return [b.strip() for b in rule_blocks if b and b.strip()]
+        # 其次按 markdown 三级标题分段
+        md_blocks = re.split(r"\n(?=###\s+)", text)
+        md_blocks = [b.strip() for b in md_blocks if b and b.strip()]
+        if len(md_blocks) > 1:
+            return md_blocks
+        # 最后按空行分段
+        return [b.strip() for b in re.split(r"\n\s*\n", text) if b and b.strip()]
+
+    def _filter_custom_prompt_by_relevance(self, question: str, prompt: str) -> str:
+        """对 custom prompt 做轻量相关性裁剪（仅后处理，不改第三方库）。"""
+        if not prompt:
+            return ""
+        enabled = bool(getattr(settings, "CUSTOM_PROMPT_RELEVANCE_ENABLED", False))
+        if not enabled:
+            return prompt
+
+        top_k = int(getattr(settings, "CUSTOM_PROMPT_TOP_K", 3) or 3)
+        min_score = int(getattr(settings, "CUSTOM_PROMPT_MIN_SCORE", 1) or 1)
+        sections = self._split_custom_prompt_sections(prompt)
+        if not sections:
+            return prompt
+
+        scored: list[tuple[int, str]] = []
+        for sec in sections:
+            scored.append((self._relevance_score(question or "", sec), sec))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        selected = [s for score, s in scored if score >= min_score][:top_k]
+
+        # 兜底：避免筛空；若都不相关则保留原文
+        if not selected:
+            _async_log_util.info(
+                f"[自定义提示词] 相关性裁剪未命中，回退全量注入。原分段数={len(sections)}"
+            )
+            return prompt
+
+        filtered = "\n\n".join(selected).strip()
+        _async_log_util.info(
+            f"[自定义提示词] 相关性裁剪完成：原长度={len(prompt)}, 裁剪后长度={len(filtered)}, "
+            f"原分段数={len(sections)}, 命中分段数={len(selected)}, top_k={top_k}, min_score={min_score}"
+        )
+        return filtered or prompt
+
+    @staticmethod
+    def _infer_expected_result_shape(question: str) -> str:
+        q = question or ""
+        if any(k in q for k in ("明细", "列表", "有哪些", "清单", "详情")):
+            return "detail_list"
+        if any(k in q for k in ("趋势", "变化", "按月", "每月", "按年", "每年")):
+            return "time_series"
+        if any(k in q for k in ("分布", "各", "分别", "排名", "Top", "top")):
+            return "grouped_result"
+        return "single_value"
+
+    @staticmethod
+    def _infer_aggregation_hint(question: str) -> str:
+        q = question or ""
+        if any(k in q for k in ("平均", "均值")):
+            return "avg"
+        if any(k in q for k in ("占比", "比例", "集中度", "贡献度", "百分比")):
+            return "ratio"
+        if any(k in q for k in ("户数", "家数", "数量", "多少个")):
+            return "count"
+        if any(k in q for k in ("总额", "金额", "规模", "亏损额", "收入", "成本", "利润")):
+            return "sum_or_metric"
+        return "unknown"
+
+    @staticmethod
+    def _extract_time_mentions(question: str) -> list[str]:
+        q = question or ""
+        hits: list[str] = []
+        for pattern in (
+                r"\d{4}年\d{1,2}月",
+                r"\d{4}年",
+                r"\d{4}Q[1-4]",
+                r"\d{4}年[一二三四1-4]季度",
+        ):
+            hits.extend(re.findall(pattern, q))
+        for kw in ("今年", "去年", "本年", "上年", "本月", "上月", "本季度", "最新", "截至"):
+            if kw in q:
+                hits.append(kw)
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _extract_metric_hint(question: str) -> str:
+        q = (question or "").strip()
+        patterns = [
+            r"的(.+?)(?:是多少|为多少|有多少|多少)$",
+            r"的(.+?)(?:情况|明细|列表|分布)$",
+        ]
+        for p in patterns:
+            m = re.search(p, q)
+            if m:
+                metric = m.group(1).strip("：:，,。？? ")
+                if metric:
+                    return metric
+        for kw in ("法人户数", "亏损额", "利润总额", "收入", "成本", "税费", "资产", "负债"):
+            if kw in q:
+                return kw
+        return ""
+
+    @staticmethod
+    def _extract_semantic_filters(question: str) -> list[dict[str, str]]:
+        q = question or ""
+        filters: list[dict[str, str]] = []
+        rule_map = [
+            ("亏损企业", "主体集合过滤", "通常表示利润总额<0的企业集合"),
+            ("存续", "状态过滤", "通常要求主体状态为存续/在营"),
+            ("并表", "口径过滤", "通常要求并表/合并口径过滤"),
+            ("海外", "范围过滤", "通常要求范围=海外/境外"),
+            ("境外", "范围过滤", "通常要求范围=海外/境外"),
+            ("境内", "范围过滤", "通常要求范围=境内/国内"),
+            ("压减", "口径过滤", "可能要求压减=是口径"),
+        ]
+        for key, category, hint in rule_map:
+            if key in q:
+                filters.append({"name": key, "category": category, "hint": hint})
+        return filters
+
+    def _build_sql_query_spec(self, question: str) -> dict[str, Any]:
+        q = (question or "").strip()
+        return {
+            "question": q,
+            "expected_result_shape": self._infer_expected_result_shape(q),
+            "aggregation_hint": self._infer_aggregation_hint(q),
+            "time_mentions": self._extract_time_mentions(q),
+            "metric_hint": self._extract_metric_hint(q),
+            "semantic_filters": self._extract_semantic_filters(q),
+        }
+
+    def _build_schema_evidence(self, question: str, schema: str, top_k: int = 12) -> str:
+        if not schema:
+            return ""
+        lines = schema.splitlines()
+        scored_indexes: list[tuple[int, int]] = []
+        for idx, line in enumerate(lines):
+            score = self._relevance_score(question or "", line or "")
+            if score > 0:
+                scored_indexes.append((score, idx))
+        if not scored_indexes:
+            return ""
+        scored_indexes.sort(key=lambda x: x[0], reverse=True)
+        picked_lines: list[str] = []
+        seen: set[str] = set()
+        for _, idx in scored_indexes[:top_k]:
+            table_header = ""
+            for back in range(idx, max(-1, idx - 6), -1):
+                if lines[back].strip().startswith("# Table:"):
+                    table_header = lines[back].strip()
+                    break
+            for item in (table_header, lines[idx].strip()):
+                if item and item not in seen:
+                    seen.add(item)
+                    picked_lines.append(item)
+        evidence = "\n".join(picked_lines).strip()
+        return evidence[:2000]
+
+    def _quote_identifier(self, name: str) -> str:
+        identifier = (name or "").strip().strip('"').strip("`").strip("[").strip("]")
+        if not identifier:
+            return identifier
+        ds_type = getattr(self.ds, "type", "")
+        if ds_type == "sqlServer":
+            return f"[{identifier}]"
+        if ds_type in ("mysql", "doris"):
+            return f"`{identifier}`"
+        return f'"{identifier}"'
+
+    def _quote_table_ref(self, table_ref: str) -> str:
+        raw = (table_ref or "").strip()
+        if not raw:
+            return raw
+        parts = [p.strip().strip('"').strip("`").strip("[").strip("]") for p in raw.split(".") if p.strip()]
+        return ".".join(self._quote_identifier(p) for p in parts)
+
+    def _parse_probe_candidates_from_schema(self, question: str, schema: str) -> list[dict[str, Any]]:
+        if not schema:
+            return []
+        lines = schema.splitlines()
+        current_table = ""
+        candidates: list[dict[str, Any]] = []
+        for line in lines:
+            stripped = line.strip()
+            table_match = re.match(r"# Table:\s*([^,\s]+)", stripped)
+            if table_match:
+                current_table = table_match.group(1).strip()
+                continue
+            col_match = re.match(r"^\(\s*([A-Za-z0-9_]+)\s*:\s*([^,\)]+)(.*)\)$", stripped)
+            if not col_match or not current_table:
+                continue
+            column = col_match.group(1).strip()
+            data_type = col_match.group(2).strip().lower()
+            tail = col_match.group(3) or ""
+            examples: list[str] = []
+            ex_match = re.search(r"examples:\[(.*?)\]", tail)
+            if ex_match:
+                examples = [v.strip().strip("'").strip('"') for v in ex_match.group(1).split(",") if v.strip()]
+            # 优先探测像维度/分类的字段，尽量避开纯数值指标列
+            is_dimension_like = any(k in data_type for k in ("char", "text", "string", "varchar"))
+            score = self._relevance_score(question or "", stripped)
+            if examples:
+                score += 2
+            if is_dimension_like and score > 0:
+                score += 1
+            if score <= 0:
+                continue
+            candidates.append({
+                "table": current_table,
+                "column": column,
+                "data_type": data_type,
+                "examples": examples[:8],
+                "score": score,
+                "line": stripped,
+            })
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates
+
+    def _build_probe_sql(self, table_ref: str, column: str, limit: int = 8) -> Optional[str]:
+        q_table = self._quote_table_ref(table_ref)
+        q_col = self._quote_identifier(column)
+        ds_type = getattr(self.ds, "type", "")
+        base = f"SELECT DISTINCT {q_col} AS value FROM {q_table} WHERE {q_col} IS NOT NULL"
+        if ds_type == "sqlServer":
+            return f"SELECT TOP {limit} DISTINCT {q_col} AS value FROM {q_table} WHERE {q_col} IS NOT NULL"
+        if ds_type == "oracle":
+            return f"SELECT value FROM ({base}) WHERE ROWNUM <= {limit}"
+        if ds_type in ("pg", "excel", "mysql", "doris", "ck", "redshift", "kingbase", "dm"):
+            return f"{base} LIMIT {limit}"
+        return None
+
+    def _probe_distinct_values_for_field(self, table_ref: str, column: str, limit: int = 8) -> list[str]:
+        sql = self._build_probe_sql(table_ref, column, limit=limit)
+        if not sql:
+            return []
+        try:
+            result = exec_sql(ds=self.ds, sql=sql, origin_column=False)
+            rows = result.get("data") or []
+            values: list[str] = []
+            for row in rows[:limit]:
+                val = row.get("value")
+                if val is None:
+                    continue
+                values.append(str(val))
+            return list(dict.fromkeys(values))
+        except Exception as e:
+            _async_log_util.debug(f"[字段值探测] 探测失败 table={table_ref}, column={column}: {e}")
+            return []
+
+    def _build_field_value_evidence(self, question: str, schema: str) -> str:
+        if not bool(getattr(settings, "SQL_FIELD_VALUE_PROBE_ENABLED", True)):
+            return ""
+        candidates = self._parse_probe_candidates_from_schema(question, schema)
+        if not candidates:
+            return ""
+        max_fields = int(getattr(settings, "SQL_FIELD_VALUE_PROBE_FIELD_TOP_K", 6) or 6)
+        max_values = int(getattr(settings, "SQL_FIELD_VALUE_PROBE_VALUE_TOP_K", 8) or 8)
+        lines: list[str] = []
+        for item in candidates[:max_fields]:
+            example_values = item.get("examples") or []
+            probed_values = self._probe_distinct_values_for_field(
+                item["table"], item["column"], limit=max_values
+            )
+            merged_values = list(dict.fromkeys((example_values + probed_values)))[:max_values]
+            if not merged_values:
+                continue
+            lines.append(
+                f"- table={item['table']}, field={item['column']}, sample_values={merged_values}"
+            )
+        evidence = "\n".join(lines).strip()
+        if evidence:
+            _async_log_util.info(f"[字段值探测] 已生成字段值证据，字段数={len(lines)}")
+        return evidence[:2500]
+
+    def _build_sql_retry_error_msg(self, feedback: str, last_sql: str) -> str:
+        brief_sql = (last_sql or "").strip()
+        if len(brief_sql) > 1500:
+            brief_sql = brief_sql[:1500] + "\n...（已截断）"
+        return (
+            "<error-msg>\n"
+            "上一版 SQL 自检未通过，请基于以下反馈纠正，不要重复原错误。\n"
+            f"问题反馈：{feedback}\n"
+            f"上一版 SQL：\n{brief_sql}\n"
+            "</error-msg>"
+        )
+
+    def _run_llm_stream_messages(
+            self,
+            messages: List[Union[BaseMessage, dict[str, Any]]]
+    ) -> tuple[list[dict[str, str]], str, str, dict]:
+        token_usage: dict[str, Any] = {}
+        chunks: list[dict[str, str]] = []
+        full_text = ""
+        full_thinking_text = ""
+        res = process_stream(self.llm.stream(messages), token_usage)
+        for chunk in res:
+            content = chunk.get('content') or ''
+            reasoning = chunk.get('reasoning_content') or ''
+            if content:
+                full_text += content
+            if reasoning:
+                full_thinking_text += reasoning
+            chunks.append({'content': content, 'reasoning_content': reasoning})
+        return chunks, full_text, full_thinking_text, token_usage
+
+    def _self_check_generated_sql(self, response_text: str, query_spec: dict[str, Any]) -> tuple[bool, str]:
+        try:
+            sql, _ = self.check_sql(response_text)
+        except Exception as e:
+            return False, f"生成结果无法解析为有效 SQL JSON：{e}"
+
+        q = (self.chat_question.question or "").strip()
+        expected_shape = (query_spec or {}).get("expected_result_shape") or ""
+        metric_hint = (query_spec or {}).get("metric_hint") or ""
+        time_mentions = (query_spec or {}).get("time_mentions") or []
+
+        heuristic_feedback: list[str] = []
+        sql_upper = sql.upper()
+        if expected_shape == "single_value" and "GROUP BY" in sql_upper:
+            heuristic_feedback.append("用户更像在问单值结果，但 SQL 出现了 GROUP BY，可能返回分组结果而不是单值。")
+        if expected_shape == "detail_list" and not any(k in sql_upper for k in ("ORDER BY", "LIMIT", "OFFSET", "ROWNUM")):
+            heuristic_feedback.append("用户更像在问明细/列表，SQL 缺少明显的明细输出或排序限制，请确认不是误生成汇总口径。")
+        for tm in time_mentions:
+            if re.search(r"\d{4}", tm) and tm[:4] not in sql:
+                heuristic_feedback.append(f"问题显式包含时间“{tm}”，但 SQL 中未明显出现对应年份/时间条件。")
+                break
+        if metric_hint and metric_hint not in q:
+            metric_hint = ""
+
+        system_prompt = (
+            "你是 SQL 语义审查器。请判断 SQL 是否真正回答了用户问题。"
+            "重点检查：统计口径、时间条件、主体范围、指标语义、结果粒度。"
+            "只返回 JSON，不要输出其他内容。格式："
+            '{"pass":true,"reason":"..."} 或 {"pass":false,"reason":"..."}'
+        )
+        user_prompt = (
+            f"<question>\n{q}\n</question>\n"
+            f"<query-spec>\n{orjson.dumps(query_spec).decode()}\n</query-spec>\n"
+            f"<heuristic-feedback>\n{chr(10).join(heuristic_feedback) if heuristic_feedback else 'None'}\n</heuristic-feedback>\n"
+            f"<sql>\n{sql}\n</sql>\n"
+            "请判断这条 SQL 是否满足问题，若不满足，reason 中明确指出缺失条件、错误口径或错误粒度。"
+        )
+        try:
+            resp = self.llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
+            content = (getattr(resp, "content", None) or "").strip()
+            json_str = extract_nested_json(content) or content
+            data = orjson.loads(json_str)
+            ok = bool(data.get("pass"))
+            reason = (data.get("reason") or "").strip()
+            if heuristic_feedback and ok:
+                # 启发式存在明显冲突时，优先守稳
+                return False, "；".join(heuristic_feedback)
+            return ok, reason or ("SQL 语义校验通过" if ok else "SQL 语义校验未通过")
+        except Exception as e:
+            if heuristic_feedback:
+                return False, "；".join(heuristic_feedback)
+            _async_log_util.warning(f"[SQL自检] LLM 审查失败，默认放行: {e}")
+            return True, f"SQL 自检调用失败，默认放行: {e}"
+
     def init_messages(self):
         """初始化SQL生成消息，使用智能上下文管理"""
         self.sql_message = []
         self._cqs_snapshot_yyyymm_done = False
         self._cqs_snapshot_yyyymm_val = None
+        # 每次构建都从基础 custom_prompt 出发，避免同请求多次 init 造成叠加
+        base_custom_prompt = (self.chat_question.custom_prompt or "").strip()
+        custom_prompt_sections: list[str] = []
+        self._append_prompt_section_unique(custom_prompt_sections, base_custom_prompt)
 
         # 多轮对话：追问场景做问题增强；单请求内只增强一次，已增强则直接复用
         if self.original_question is None:  # 只在第一次调用时保存原始问题
@@ -579,10 +1013,8 @@ class LLMService:
                 # 当前暂无数据，不生成SQL，直接返回错误消息
                 _async_log_util.info(f"[表选择规则] 检测到当前暂无数据，查询年份: {table_selection_info.get('year', 'unknown')}")
             elif table_selection_info["status"] == "rule":
-                # 将规则追加到 custom_prompt（如果 custom_prompt 存在则追加，否则直接使用规则）
-                original_custom_prompt = self.chat_question.custom_prompt or ""
                 rule_text = table_selection_info["rule_text"]
-                self.chat_question.custom_prompt = f"{original_custom_prompt}\n\n{rule_text}" if original_custom_prompt else rule_text
+                self._append_prompt_section_unique(custom_prompt_sections, rule_text)
                 _async_log_util.info(f"[表选择规则] 已生成并注入规则，表类型: {table_selection_info['table_type']}, 表名: {table_selection_info['table_name']}")
 
         # jq_zbval 表：公司字段过滤、公司/集团查询规则
@@ -597,8 +1029,7 @@ class LLMService:
                 "4) **年报表 dws_cgn_jq_zbval_year 的 sys_datatime**：该字段为年报统计周期码（如 202204、202404），后两位非月份含义。SELECT 中若将 sys_datatime 作为时间维度展示，必须用 LEFT(sys_datatime, 4) 或 SUBSTR(sys_datatime, 1, 4) 并 AS 为「year」，例如 SELECT LEFT(sys_datatime, 4) AS \"year\", ...，避免分析端将 202404 误读为 2024年4月。WHERE 中按原值筛选即可。\n"
                 "</rule>"
             )
-            original_custom_prompt = self.chat_question.custom_prompt or ""
-            self.chat_question.custom_prompt = f"{original_custom_prompt}\n\n{jq_zbval_rule}" if original_custom_prompt else jq_zbval_rule
+            self._append_prompt_section_unique(custom_prompt_sections, jq_zbval_rule)
             _async_log_util.info("[jq_zbval] 已注入公司字段脏数据过滤规则")
 
         if "dws_cqs" in schema:
@@ -609,17 +1040,49 @@ class LLMService:
                     f"<rule>**法人户数 dws_cqs 数据时点**：压减=是 口径以 **MAX(version_code)** 为最新批次，当前至 **{cy}年{cm:02d}月**（version_code='{cap_ym:06d}'）。"
                     f"即使用户问到更晚年月，version_code 也不得超过该值；create_date 易错、勿单独作为时间依据。</rule>"
                 )
-                op = self.chat_question.custom_prompt or ""
-                self.chat_question.custom_prompt = f"{op}\n\n{cqs_time_rule}" if op else cqs_time_rule
+                self._append_prompt_section_unique(custom_prompt_sections, cqs_time_rule)
                 _async_log_util.info(f"[cqs] 已注入快照上限提示: {cy}-{cm:02d}")
 
         audit_prompt = collect_sql_generation_audit_prompt(self.chat_question.question or "", schema)
         if audit_prompt:
-            op = self.chat_question.custom_prompt or ""
-            self.chat_question.custom_prompt = f"{op}{audit_prompt}" if op else audit_prompt.strip()
+            self._append_prompt_section_unique(custom_prompt_sections, audit_prompt)
+
+        self.chat_question.custom_prompt = "\n\n".join(custom_prompt_sections)
 
         # add sys prompt
         self.sql_message.append(SystemMessage(content=self.chat_question.sql_sys_question()))
+
+        # 生成前补一层结构化取数规格与 schema 证据，帮助模型理解深表语义与结果形状
+        if bool(getattr(settings, "SQL_QUERY_SPEC_ENABLED", True)):
+            self._sql_query_spec = self._build_sql_query_spec(self.chat_question.question or "")
+            self._sql_schema_evidence = self._build_schema_evidence(
+                self.chat_question.question or "",
+                self.chat_question.db_schema or ""
+            )
+            self._sql_field_value_evidence = self._build_field_value_evidence(
+                self.chat_question.question or "",
+                self.chat_question.db_schema or ""
+            )
+            self.sql_message.append(HumanMessage(
+                content="<query-spec>\n"
+                        f"{orjson.dumps(self._sql_query_spec).decode()}\n"
+                        "</query-spec>\n"
+                        "上面的 query-spec 是对当前问题的结构化拆解，请以它为约束生成 SQL。"
+            ))
+            if self._sql_schema_evidence:
+                self.sql_message.append(HumanMessage(
+                    content="<schema-evidence>\n"
+                            f"{self._sql_schema_evidence}\n"
+                            "</schema-evidence>\n"
+                            "这些是与当前问题更相关的 schema 证据，请优先参考这些表和字段。"
+                ))
+            if self._sql_field_value_evidence:
+                self.sql_message.append(HumanMessage(
+                    content="<field-value-evidence>\n"
+                            f"{self._sql_field_value_evidence}\n"
+                            "</field-value-evidence>\n"
+                            "这些是系统对相关字段自动探测到的样本值。生成 SQL 过滤条件前，请先参考这些字段实际可能出现的值。"
+                ))
         
         # 使用上下文管理器进行智能上下文提取
         # 注意：使用原始问题进行上下文需求分析，以便正确检测时间追问等模式
@@ -1708,8 +2171,13 @@ class LLMService:
             self.chat_question.data_training = get_training_template(self.session, self.chat_question.question, ds_id,
                                                                      oid)
             if SQLBotLicenseUtil.valid() and find_custom_prompts is not None:
-                self.chat_question.custom_prompt = find_custom_prompts(self.session, CustomPromptTypeEnum.GENERATE_SQL,
-                                                                   oid, ds_id)
+                raw_custom_prompt = find_custom_prompts(
+                    self.session, CustomPromptTypeEnum.GENERATE_SQL, oid, ds_id
+                )
+                self.chat_question.custom_prompt = self._filter_custom_prompt_by_relevance(
+                    self.chat_question.question or "",
+                    raw_custom_prompt or ""
+                )
 
             self.init_messages()
 
@@ -1844,18 +2312,62 @@ class LLMService:
                                                                   full_message=[
                                                                       {'type': msg.type, 'content': msg.content} for msg
                                                                       in self.sql_message])
-        full_thinking_text = ''
-        full_sql_text = ''
-        token_usage = {}
-        res = process_stream(self.llm.stream(self.sql_message), token_usage)
-        for chunk in res:
-            if chunk.get('content'):
-                full_sql_text += chunk.get('content')
-            if chunk.get('reasoning_content'):
-                full_thinking_text += chunk.get('reasoning_content')
+        query_spec = getattr(self, "_sql_query_spec", None) or self._build_sql_query_spec(self.chat_question.question or "")
+        final_messages = list(self.sql_message)
+        final_chunks, full_sql_text, full_thinking_text, token_usage = self._run_llm_stream_messages(final_messages)
+
+        self_check_enabled = bool(getattr(settings, "SQL_SELF_CHECK_ENABLED", True))
+        retry_count = int(getattr(settings, "SQL_SELF_CHECK_RETRY_COUNT", 1) or 1)
+        if self_check_enabled:
+            passed, feedback = self._self_check_generated_sql(full_sql_text, query_spec)
+            self._trace_step(
+                node_key="sql_self_check",
+                node_name="SQL自检",
+                input_payload={
+                    "question": self.chat_question.question,
+                    "query_spec": query_spec,
+                },
+                output_payload={
+                    "passed": passed,
+                    "feedback": feedback,
+                }
+            )
+            if not passed and retry_count > 0:
+                _async_log_util.info(f"[SQL自检] 首轮未通过，准备重试一次。反馈: {feedback[:200]}")
+                original_error_msg = self.chat_question.error_msg
+                try:
+                    self.chat_question.error_msg = self._build_sql_retry_error_msg(feedback, full_sql_text)
+                    retry_user_message = HumanMessage(
+                        self.chat_question.sql_user_question(current_time=self._get_effective_current_time())
+                    )
+                    retry_messages = list(self.sql_message[:-1]) + [retry_user_message]
+                    retry_chunks, retry_text, retry_thinking, retry_token_usage = self._run_llm_stream_messages(retry_messages)
+                    retry_passed, retry_feedback = self._self_check_generated_sql(retry_text, query_spec)
+                    self._trace_step(
+                        node_key="sql_self_check_retry",
+                        node_name="SQL自检重试",
+                        input_payload={"feedback": feedback},
+                        output_payload={
+                            "passed": retry_passed,
+                            "feedback": retry_feedback,
+                        }
+                    )
+                    if retry_passed:
+                        final_messages = retry_messages
+                        final_chunks = retry_chunks
+                        full_sql_text = retry_text
+                        full_thinking_text = retry_thinking
+                        token_usage = retry_token_usage
+                        _async_log_util.info("[SQL自检] 重试后通过，采用纠正后的 SQL")
+                    else:
+                        _async_log_util.info(f"[SQL自检] 重试后仍未通过，保留首轮结果。反馈: {retry_feedback[:200]}")
+                finally:
+                    self.chat_question.error_msg = original_error_msg
+
+        for chunk in final_chunks:
             yield chunk
 
-        self.sql_message.append(AIMessage(full_sql_text))
+        self.sql_message = list(final_messages) + [AIMessage(full_sql_text)]
 
         self.current_logs[OperationEnum.GENERATE_SQL] = end_log(session=self.session,
                                                                 log=self.current_logs[OperationEnum.GENERATE_SQL],
@@ -2866,7 +3378,20 @@ class LLMService:
                 terminology_query = self.chat_question.question or ""
                 terminology_template, terminology_data = get_terminology_template_with_data(
                     self.session, terminology_query, oid, ds_id)
-                self.chat_question.terminologies = terminology_template
+                terminology_data = self._filter_topk_items_by_relevance(
+                    query=terminology_query,
+                    items=terminology_data if isinstance(terminology_data, list) else [],
+                    text_builder=lambda t: " ".join((t.get("words") or [])) + " " + (t.get("description") or ""),
+                    top_k=8,
+                    min_score=1
+                )
+                self.chat_question.terminologies = (
+                    get_base_terminology_template().format(
+                        terminologies=terminology_to_xml_string(terminology_data)
+                    ) if terminology_data else ""
+                )
+                if not self.chat_question.terminologies:
+                    self.chat_question.terminologies = terminology_template
                 self._trace_step(
                     node_key="terminology_retrieval",
                     node_name="术语检索",
@@ -2923,6 +3448,13 @@ class LLMService:
                     self.chat_question.question or "",
                 )
                 if training_data_filtered:
+                    training_data_filtered = self._filter_topk_items_by_relevance(
+                        query=training_query,
+                        items=training_data_filtered if isinstance(training_data_filtered, list) else [],
+                        text_builder=lambda t: (t.get("question") or "") + " " + (t.get("sql-template") or ""),
+                        top_k=12,
+                        min_score=1
+                    )
                     self.chat_question.data_training = get_base_data_training_template().format(
                         data_training=to_xml_string(training_data_filtered, need_template=True)
                     )
@@ -2970,8 +3502,13 @@ class LLMService:
                     }).decode() + '\n\n'
                 
                 if SQLBotLicenseUtil.valid() and find_custom_prompts is not None:
-                    custom_prompt_result = find_custom_prompts(self.session, CustomPromptTypeEnum.GENERATE_SQL,
-                                                                       oid, ds_id)
+                    raw_custom_prompt = find_custom_prompts(
+                        self.session, CustomPromptTypeEnum.GENERATE_SQL, oid, ds_id
+                    )
+                    custom_prompt_result = self._filter_custom_prompt_by_relevance(
+                        self.chat_question.question or "",
+                        raw_custom_prompt or ""
+                    )
                     self.chat_question.custom_prompt = custom_prompt_result
                     custom_prompt_length = len(custom_prompt_result) if custom_prompt_result else 0
                     _async_log_util.info(f"[自定义提示词] 获取自定义提示词完成，类型: GENERATE_SQL, 长度: {custom_prompt_length} 字符")

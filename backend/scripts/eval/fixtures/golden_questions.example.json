@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "meta": {
+    "description": "复制为 golden_questions.json 后修改 datasource / question；严格对比使用 description（示例 SQL），勿填模板占位符"
+  },
+  "items": [
+    {
+      "id": "example_1",
+      "datasource": 1,
+      "question": "请统计各月份的订单数量",
+      "description": "SELECT ...",
+      "reference_sql": ""
+    }
+  ]
+}

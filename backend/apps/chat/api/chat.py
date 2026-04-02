@@ -13,7 +13,7 @@ from common.utils.utils import SQLBotLogUtil
 
 from apps.chat.curd.chat import list_chats, get_chat_with_records, create_chat, rename_chat, \
     delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, get_chat_record_by_id, \
-    create_error_query_record, list_execution_traces
+    create_error_query_record, create_chat_record_feedback, list_execution_traces
 from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, ExcelData
 from apps.chat.task.llm import LLMService
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser, Trans
@@ -122,14 +122,23 @@ class FeedbackBody(BaseModel):
 
 @router.post("/feedback")
 async def submit_feedback(session: SessionDep, current_user: CurrentUser, body: FeedbackBody):
-    """对话反馈：点赞或点踩。点踩时需传 reason，系统将问题、SQL、报错写入错误查询记录供运维查看。"""
+    """对话反馈：点赞或点踩。点赞/点踩均写入 chat_record_feedback；点踩另写入 error_query_record 供运维处理。"""
     if body.is_like:
-        return {"ok": True, "message": "感谢反馈"}
+        try:
+            create_chat_record_feedback(
+                session, body.record_id, current_user, is_like=True, feedback_reason=None
+            )
+            return {"ok": True, "message": "感谢反馈"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     reason = (body.reason or "").strip()
     if reason not in ("no_result", "inaccurate_data", "wrong_analysis"):
         raise HTTPException(status_code=400, detail="点踩时请选择原因：no_result / inaccurate_data / wrong_analysis")
     try:
         create_error_query_record(session, body.record_id, current_user, feedback_reason=reason)
+        create_chat_record_feedback(
+            session, body.record_id, current_user, is_like=False, feedback_reason=reason
+        )
         return {"ok": True, "message": "反馈已记录，我们会尽快处理"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

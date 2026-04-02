@@ -133,6 +133,21 @@ class ErrorQueryRecord(SQLModel, table=True):
     create_time: datetime = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
 
 
+class ChatRecordFeedback(SQLModel, table=True):
+    """统一记录点赞/点踩，便于评测与统计分析；点踩仍会写入 error_query_record。"""
+    __tablename__ = "chat_record_feedback"
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    record_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联 chat_record.id")
+    chat_id: int = Field(sa_column=Column(BigInteger, nullable=False))
+    create_by: Optional[int] = Field(sa_column=Column(BigInteger, nullable=True))
+    is_like: bool = Field(sa_column=Column(Boolean, nullable=False), description="True=点赞 False=点踩")
+    feedback_reason: Optional[str] = Field(
+        sa_column=Column(Text, nullable=True),
+        description="点踩原因 no_result|inaccurate_data|wrong_analysis；点赞为空",
+    )
+    create_time: Optional[datetime] = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
+
+
 class ChatExecutionTraceStatus:
     RUNNING = "running"
     SUCCESS = "success"

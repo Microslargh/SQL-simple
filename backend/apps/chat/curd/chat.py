@@ -6,7 +6,7 @@ import sqlparse
 from sqlalchemy import and_, select, update
 
 from apps.chat.models.chat_model import Chat, ChatRecord, CreateChat, ChatInfo, RenameChat, ChatQuestion, ChatLog, \
-    TypeEnum, OperationEnum, ChatRecordResult, ErrorQueryRecord, ChatExecutionTrace, \
+    TypeEnum, OperationEnum, ChatRecordResult, ErrorQueryRecord, ChatRecordFeedback, ChatExecutionTrace, \
     ChatExecutionTraceResult, ChatExecutionTraceStatus
 from apps.datasource.models.datasource import CoreDatasource
 from apps.system.crud.assistant import AssistantOutDsFactory
@@ -1012,6 +1012,36 @@ def create_error_query_record(
     session.flush()
     session.refresh(rec)
     session.commit()
+    return rec
+
+
+def create_chat_record_feedback(
+    session: SessionDep,
+    record_id: int,
+    current_user: CurrentUser,
+    *,
+    is_like: bool,
+    feedback_reason: str | None = None,
+) -> ChatRecordFeedback:
+    """写入点赞/点踩统一表（与 error_query_record 并存；点踩场景会先写 error 再调本函数）。"""
+    stmt = select(ChatRecord.chat_id).where(
+        and_(ChatRecord.id == record_id, ChatRecord.create_by == current_user.id)
+    )
+    row = session.execute(stmt).first()
+    if not row:
+        raise Exception("Permission denied or record not found")
+    chat_id = row[0]
+    rec = ChatRecordFeedback(
+        record_id=record_id,
+        chat_id=chat_id,
+        create_by=current_user.id,
+        is_like=is_like,
+        feedback_reason=feedback_reason,
+        create_time=datetime.datetime.now(),
+    )
+    session.add(rec)
+    session.commit()
+    session.refresh(rec)
     return rec
 
 

@@ -67,8 +67,10 @@ from apps.chat.utils.sql_generation_audit_rules import collect_sql_generation_au
 from apps.chat.utils.jq_zb_title_mapping import (
     get_jq_zb_title_candidates,
     get_special_month_code,
+    normalize_jq_zb_title_profit_quotes,
     SPECIAL_MONTH_ALL_CODES,
 )
+from apps.chat.utils.industry_system_mapping import normalize_cross_system_industry_in_sql
 from common.core.config import settings
 from common.core.db import engine
 from common.core.deps import CurrentAssistant, CurrentUser
@@ -1032,6 +1034,8 @@ class LLMService:
                 "2) 查某个公司的经营情况指标时：因表中公司名称不统一（部分需加「本部」后缀），使用 IN 同时匹配两种形式，例如 sys_unittitle IN ('红沿河公司', '红沿河公司（本部）')。\n"
                 "3) 查集团层经营情况指标时：固定使用 sys_unittitle = '中国广核集团有限公司（合并）'。\n"
                 "4) **年报表 dws_cgn_jq_zbval_year 的 sys_datatime**：该字段为年报统计周期码（如 202204、202404），后两位非月份含义。SELECT 中若将 sys_datatime 作为时间维度展示，必须用 LEFT(sys_datatime, 4) 或 SUBSTR(sys_datatime, 1, 4) 并 AS 为「year」，例如 SELECT LEFT(sys_datatime, 4) AS \"year\", ...，避免分析端将 202404 误读为 2024年4月。WHERE 中按原值筛选即可。\n"
+                "5) **产业过滤字段 bk**：必须使用久其系统枚举（如：非动力核技术、科技型环保、集团及直管公司、数字化、财务公司、共享公司 等），"
+                "勿使用产权侧名称（如：核技术、环保/节能、集团/股份、数字化产业、司库）；与产权「板块」命名不一致。\n"
                 "</rule>"
             )
             self._append_prompt_section_unique(custom_prompt_sections, jq_zbval_rule)
@@ -1047,6 +1051,11 @@ class LLMService:
                 )
                 self._append_prompt_section_unique(custom_prompt_sections, cqs_time_rule)
                 _async_log_util.info(f"[cqs] 已注入快照上限提示: {cy}-{cm:02d}")
+            cqs_plate_rule = (
+                "<rule>**产权产业/板块取值**：查询 dws_cqs_* 时，分类字段（如 plate）须使用产权系统枚举（如：核技术、集团/股份、环保/节能、数字化产业、司库 等），"
+                "勿使用久其 bk 名称（如：非动力核技术、集团及直管公司、数字化、财务公司、共享公司）；与久其「产业」命名不一致。</rule>"
+            )
+            self._append_prompt_section_unique(custom_prompt_sections, cqs_plate_rule)
 
         audit_prompt = collect_sql_generation_audit_prompt(self.chat_question.question or "", schema)
         if audit_prompt:
@@ -3260,6 +3269,18 @@ class LLMService:
         if "dws_cgn_jq_zbval_month" not in (sql or "").lower():
             return sql
 
+        # 修复错误转义：`= \'CODE\'` 在 ClickHouse 中非法（反斜杠会被当作字面量）。
+        # 来源可能是 LLM 误写或历史上 raw string 拼接 bug。
+        def _fix_bad_zb_name_esc(m: re.Match) -> str:
+            return f'{m.group(1)} = \'{m.group(2)}\''
+
+        sql = re.sub(
+            r'("?zb_name"?)\s*=\s*\\\'([A-Z0-9]+)\\\'',
+            _fix_bad_zb_name_esc,
+            sql,
+            flags=re.IGNORECASE,
+        )
+
         month_pos = (sql or "").lower().find("dws_cgn_jq_zbval_month")
         month_sql = sql[month_pos:] if month_pos >= 0 else sql
         title_match = re.search(
@@ -3278,7 +3299,11 @@ class LLMService:
             rf'("?zb_name"?)\s*=\s*([\'"])({special_codes_re})\2',
             re.IGNORECASE
         )
-        sql2 = code_eq_pattern.sub(lambda m: f'{m.group(1)} = \'{target_code}\'', sql)
+        # 注意：替换串勿用 raw string 拼 `\'`，否则会变成字面反斜杠，ClickHouse 报 Syntax error: unrecognized token '\'
+        sql2 = code_eq_pattern.sub(
+            lambda m: f'{m.group(1)} = \'{target_code}\'',
+            sql,
+        )
 
         # 2) 若 month 分支没有 zb_name 条件，则补一条，避免同 title 命中到错误口径
         if re.search(r'("?zb_name"?)\s*=', sql2, flags=re.IGNORECASE):
@@ -3288,7 +3313,7 @@ class LLMService:
 
         injected = re.sub(
             r'(\bFROM\s+"?default"?\."?dws_cgn_jq_zbval_month"?\s*\n\s*WHERE\s+)',
-            r'\1"zb_name" = \'' + target_code + r'\' AND ',
+            lambda m: m.group(1) + f'"zb_name" = \'{target_code}\' AND ',
             sql2,
             count=1,
             flags=re.IGNORECASE,
@@ -3299,6 +3324,8 @@ class LLMService:
 
     def check_save_sql(self, res: str) -> str:
         sql, *_ = self.check_sql(res=res)
+        sql = normalize_jq_zb_title_profit_quotes(sql)
+        sql = normalize_cross_system_industry_in_sql(sql)
         sql = self._rewrite_jq_zbval_year_sys_datatime(sql)
         sql = self._rewrite_jq_zb_title_for_mixed_tables(sql)
         sql = self._rewrite_jq_month_special_zb_name(sql)

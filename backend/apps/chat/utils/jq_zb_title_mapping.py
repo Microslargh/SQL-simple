@@ -166,6 +166,23 @@ def get_special_month_code(question: str, zb_title: str | None = None) -> str | 
     return cfg["overseas_code"] if is_overseas_query(question) else cfg["domestic_code"]
 
 
+# 利润总额指标名中，库内为中文弯引号「"」「"」；模型常误写为 ASCII 直引号 "，导致 WHERE 不命中。
+_PROFIT_TITLE_ASCII_INNER = '以"-"号填列'
+_PROFIT_TITLE_CN_INNER = f"以\u201c-\u201d号填列"
+
+
+def normalize_jq_zb_title_profit_quotes(sql: str) -> str:
+    """
+    将 zb_title 字符串里利润总额一段的 ASCII 双引号改为库内使用的中文弯引号。
+    仅处理包含 dws_cgn_jq_zbval 的 SQL，避免误伤其他语句。
+    """
+    if not sql or "dws_cgn_jq_zbval" not in sql.lower():
+        return sql
+    if _PROFIT_TITLE_ASCII_INNER not in sql:
+        return sql
+    return sql.replace(_PROFIT_TITLE_ASCII_INNER, _PROFIT_TITLE_CN_INNER)
+
+
 def get_jq_zb_title_candidates(raw_title: str, table_type: str) -> List[str]:
     """
     根据输入标题和目标表类型返回候选标题。
@@ -177,6 +194,8 @@ def get_jq_zb_title_candidates(raw_title: str, table_type: str) -> List[str]:
     raw = (raw_title or "").strip()
     if not raw:
         return []
+    if _PROFIT_TITLE_ASCII_INNER in raw:
+        raw = raw.replace(_PROFIT_TITLE_ASCII_INNER, _PROFIT_TITLE_CN_INNER)
 
     titles = YEAR_TITLES if table_type == "year" else MONTH_TITLES
     core_map = YEAR_CORE_MAP if table_type == "year" else MONTH_CORE_MAP

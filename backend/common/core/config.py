@@ -164,6 +164,10 @@ class Settings(BaseSettings):
     GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")
     GUESS_SQL_VALIDATE_ENABLED: bool = Field(default=False, description="是否启用猜你想问 SQL 预验证（会增加延迟）")
 
+    # SQL 生成后语义自检（额外一次 LLM 调用；日志见 [SQL自检] 与执行追踪节点 sql_self_check）
+    SQL_SELF_CHECK_ENABLED: bool = Field(default=True, description="是否启用生成 SQL 的语义自检")
+    SQL_SELF_CHECK_RETRY_COUNT: int = Field(default=1, description="自检未通过时重试生成 SQL 的次数，0 表示不重试")
+
     # OAuth2 SSO 配置
     OAUTH2_ENABLED: bool = True  # 是否启用OAuth2单点登录（默认禁用，需要手动启用）
     OAUTH2_AUTHORIZATION_URL: str = "https://uap-t.cgnpc.com.cn/authcenter/getOauth2Authorize"  # OAuth2授权服务器地址，例如: https://oauth.example.com/oauth/authorize

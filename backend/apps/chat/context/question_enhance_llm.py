@@ -12,25 +12,10 @@ import requests
 from common.core.config import settings
 from common.utils.utils import _async_log_util
 
-# 统一产业名称（产权表、久其月报、决算表共用）
-INDUSTRY_CANONICAL = [
-    '新能源', '资本控股', '能源国际', '核技术', '核电', '集团/股份',
-    '环保/节能', '核燃料', '核服', '英国核电', '数字化产业', '司库'
-]
-
-# 别名 -> 统一产业名称
-INDUSTRY_ALIAS_TO_CANONICAL = {
-    '集团股份产业': '集团/股份',
-    '集团股份': '集团/股份',
-    '股份产业': '集团/股份',
-    '股份': '集团/股份',
-    '环保节能': '环保/节能',
-    '环保产业': '环保/节能',
-    '节能环保': '环保/节能',
-    '环保': '环保/节能',
-    '数字产业': '数字化产业',
-    '数字化': '数字化产业',
-}
+from apps.chat.utils.industry_system_mapping import (
+    INDUSTRY_CANONICAL_LIST as INDUSTRY_CANONICAL,
+    NL_ALIAS_TO_CANONICAL as INDUSTRY_ALIAS_TO_CANONICAL,
+)
 
 QUESTION_ENHANCE_SYSTEM_PROMPT = """你是一个智能问数系统的「追问补全专家」。你的任务是：仅对用户当前问题进行指代补全，使其成为一句可独立理解的完整查询语句，不得改变原始查询意图。
 

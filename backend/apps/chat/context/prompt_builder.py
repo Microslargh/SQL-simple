@@ -70,8 +70,13 @@ class ContextPromptBuilder:
                 time_value = context.time_range['time']
                 parts.append(f'<time-range time="{time_value}" format="{time_format}">{time_value}</time-range>')
         
-        # 完整历史SQL（用于追问场景，提供表名和字段名参考）
+        # 历史SQL（用于追问场景，提供表名和字段名参考；不作为当前问题硬约束）
         if context.history_sql:
+            parts.append(
+                "<history-sql-note>以下 history-sql 仅用于参考表名、字段名与 SQL 结构；"
+                "不得直接继承其中的地域过滤、口径修正（如 +1）等具体条件。"
+                "当前 SQL 以当前问题和术语规则为准。</history-sql-note>"
+            )
             parts.append(f'<history-sql>{context.history_sql}</history-sql>')
 
         # 应丢弃的过滤条件（语义仲裁：子集过滤与全量分布冲突时）

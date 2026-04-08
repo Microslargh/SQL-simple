@@ -71,6 +71,7 @@ from apps.chat.utils.jq_zb_title_mapping import (
     SPECIAL_MONTH_ALL_CODES,
 )
 from apps.chat.utils.industry_system_mapping import normalize_cross_system_industry_in_sql
+from apps.chat.utils.cqs_rule_engine import build_cqs_group_rule_prompt, apply_cqs_sql_rules
 from common.core.config import settings
 from common.core.db import engine
 from common.core.deps import CurrentAssistant, CurrentUser
@@ -285,15 +286,21 @@ class LLMService:
         cqs 表且问题未明确指定时间时：压减=是 口径下以 **MAX(version_code)** 对应年月为业务最新快照
         （create_date 易错，不再优先使用）；否则使用系统时间。
         """
+        cached = getattr(self, "_cached_effective_current_time", None)
+        if cached is not None:
+            return cached
         default_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not self.ds:
+            self._cached_effective_current_time = default_time
             return default_time
         schema = (self.chat_question.db_schema or '')
         if 'dws_cqs' not in schema:
+            self._cached_effective_current_time = default_time
             return default_time
         question = (self.chat_question.question or '').strip()
         time_keywords = ['时间', '日期', '月份', '年份', '年', '月', '日', '去年', '今年', '前年']
         if any(kw in question for kw in time_keywords):
+            self._cached_effective_current_time = default_time
             return default_time
         try:
             sql_vc = (
@@ -314,6 +321,7 @@ class LLMService:
                         _async_log_util.info(
                             f"[current_time] cqs 压减口径，使用 MAX(version_code)={s[:6]} 对应时间: {effective}"
                         )
+                        self._cached_effective_current_time = effective
                         return effective
             sql_dt = (
                 "SELECT MAX(create_date) AS latest FROM default.dws_cqs_enterprise_query_view_full "
@@ -322,12 +330,14 @@ class LLMService:
             result = exec_sql(ds=self.ds, sql=sql_dt)
             if not result or not result.get('data') or not result['data'][0]:
                 _async_log_util.info(f"[current_time] cqs 无 version_code/create_date，使用系统时间: {default_time}")
+                self._cached_effective_current_time = default_time
                 return default_time
             row = result['data'][0]
             raw = row.get('latest') or row.get('Latest') if isinstance(row, dict) else None
             if raw is None and isinstance(row, dict):
                 raw = next((v for k, v in row.items() if v is not None), None)
             if raw is None:
+                self._cached_effective_current_time = default_time
                 return default_time
             if isinstance(raw, datetime):
                 effective = raw.strftime('%Y-%m-%d %H:%M:%S')
@@ -340,9 +350,11 @@ class LLMService:
                 else:
                     effective = default_time
             _async_log_util.info(f"[current_time] cqs 回退 MAX(create_date): {effective}")
+            self._cached_effective_current_time = effective
             return effective
         except Exception as e:
             _async_log_util.info(f"[current_time] cqs 取最新快照失败，使用系统时间: {default_time}, 错误: {e}")
+            self._cached_effective_current_time = default_time
             return default_time
 
     def _parse_row_datetime_to_yyyymm(self, raw: Any) -> Optional[int]:
@@ -1056,6 +1068,8 @@ class LLMService:
                 "勿使用久其 bk 名称（如：非动力核技术、集团及直管公司、数字化、财务公司、共享公司）；与久其「产业」命名不一致。</rule>"
             )
             self._append_prompt_section_unique(custom_prompt_sections, cqs_plate_rule)
+            cqs_group_rule = build_cqs_group_rule_prompt(self.chat_question.question or "", schema)
+            self._append_prompt_section_unique(custom_prompt_sections, cqs_group_rule)
 
         audit_prompt = collect_sql_generation_audit_prompt(self.chat_question.question or "", schema)
         if audit_prompt:
@@ -2481,6 +2495,38 @@ class LLMService:
             )
             return False
 
+        # 复合指标预检：用户仅问「法人户数」一类，模板捆绑纳税/久其/税务等多指标时不匹配（避免误用模板 210 等）
+        # 说明：仅看 template_question 可能缺字（库内文案与展示不一致），需同时检查 sql-template 是否 JOIN 非产权表
+        _BUNDLE_METRIC_MARKERS = ("纳税", "税费", "缴税", "税收", "营收", "营业收入", "纳税总额", "利润总额", "已交税费")
+        user_mentions_legal_count = ("法人户数" in user_question) or (
+            "法人" in user_question and "户数" in user_question
+        )
+        user_asks_bundle = any(m in user_question for m in _BUNDLE_METRIC_MARKERS)
+        tpl_text = f"{template_question}\n{sql_template or ''}"
+        template_has_bundle = any(m in tpl_text for m in _BUNDLE_METRIC_MARKERS)
+        st_low = (sql_template or "").lower()
+        # 非产权台账表的指标/税务 SQL，与「仅法人户数」单表 COUNT 结构不同
+        template_sql_non_cqs_metrics = any(
+            x in st_low
+            for x in (
+                "dws_cgn_jq_zbval",
+                "dws_tmis_tax",
+                "dws_sit_tmas",
+            )
+        )
+        if user_mentions_legal_count and not user_asks_bundle and (
+            template_has_bundle or template_sql_non_cqs_metrics
+        ):
+            _async_log_util.info(
+                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                f"用户仅问法人户数，模板含纳税/久其/税务等复合指标或 SQL 结构非单表 CQS 户数"
+            )
+            self._trace_end(
+                trace,
+                output_payload={"matched": False, "reason": "legal_count_only_vs_bundle_template"},
+            )
+            return False
+
         # 明细 vs 汇总预检：用户要「明细/列表/导出明细」而模板问句无明细/列表/导出，不匹配（SQL 结构不同）
         _DETAIL_MARKERS = ("明细", "列表", "导出", "详情", "清单")
         user_wants_detail = any(m in user_question for m in _DETAIL_MARKERS)
@@ -3326,6 +3372,7 @@ class LLMService:
         sql, *_ = self.check_sql(res=res)
         sql = normalize_jq_zb_title_profit_quotes(sql)
         sql = normalize_cross_system_industry_in_sql(sql)
+        sql = apply_cqs_sql_rules(sql, self.chat_question.question or "", self._fetch_cqs_max_snapshot_yyyymm())
         sql = self._rewrite_jq_zbval_year_sys_datatime(sql)
         sql = self._rewrite_jq_zb_title_for_mixed_tables(sql)
         sql = self._rewrite_jq_month_special_zb_name(sql)

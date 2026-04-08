@@ -11,6 +11,7 @@ from apps.chat.context.context_cleaner import get_slots_to_discard_hint
 from apps.chat.context.extractors import EntityReferenceExtractor, SQLPatternExtractor, IntentContinuityAnalyzer
 from apps.chat.context.prompt_builder import ContextPromptBuilder
 from apps.chat.context.question_enhancer import QuestionEnhancer, is_any_follow_up
+from apps.chat.utils.cqs_rule_engine import _COUNT_DISTINCT_NAME
 from apps.chat.context.question_enhance_llm import rewrite_question_with_llm
 from common.core.config import settings
 from common.utils.utils import _async_log_util
@@ -27,6 +28,34 @@ class ContextStateManager:
         self.intent_analyzer = IntentContinuityAnalyzer()
         self.prompt_builder = ContextPromptBuilder()
         self.question_enhancer = QuestionEnhancer()
+
+    @staticmethod
+    def _sanitize_history_sql_for_context(history_sql: str) -> str:
+        """
+        历史 SQL 仅用于“结构参考”，避免把上一轮业务口径硬继承到当前问句。
+        处理策略：
+        - 去掉 COUNT(DISTINCT name) + 1 的 +1 口径；
+        - 去掉省份条件（name_1='xx省'），避免“广东 -> 江西”污染；
+        - 保留表名/字段/聚合结构用于多轮参考。
+        """
+        if not history_sql:
+            return history_sql
+        s = history_sql
+        # 去掉法人户数 +1 口径，避免跨地区追问被继承
+        s = re.sub(
+            rf"({_COUNT_DISTINCT_NAME})\s*\+\s*1",
+            r"\1",
+            s,
+            flags=re.IGNORECASE,
+        )
+        # 去掉省份过滤（name_1 = '广东省' 这类）
+        s = re.sub(
+            r"\s+AND\s+(?:c\.)?\"?name_1\"?\s*=\s*'[^']*省'",
+            "",
+            s,
+            flags=re.IGNORECASE,
+        )
+        return s
     
     def enhance_question_with_history(self, current_question: str, history_logs: List[ChatLog]) -> str:
         """增强当前问题，自动补充历史问题中的关键信息
@@ -294,6 +323,7 @@ class ContextStateManager:
                 if record and record.sql and record.sql.strip():
                     # 提取完整的历史SQL（限制长度，避免过长）
                     history_sql = record.sql.strip()
+                    history_sql = self._sanitize_history_sql_for_context(history_sql)
                     # 限制SQL长度，避免上下文过长（保留前500字符，通常包含表名和关键字段）
                     if len(history_sql) > 500:
                         # 尝试保留SELECT和FROM部分（最重要的表名和字段信息）
@@ -320,6 +350,16 @@ class ContextStateManager:
                             history_sql=record.sql.strip(),
                         )
                         if discarded:
+                            # CQS 法人户数场景：version_code 属于强约束时间槽位，不允许被仲裁丢弃
+                            cur_q = (current_question or "")
+                            his_sql = (record.sql or "")
+                            is_cqs_legal = (
+                                ("dws_cqs" in his_sql.lower() or "enterprise_query_view" in his_sql.lower())
+                                and (("法人户数" in cur_q) or ("户数" in cur_q))
+                            )
+                            if is_cqs_legal and "version_code" in discarded:
+                                discarded = [s for s in discarded if s != "version_code"]
+                                _async_log_util.info("[上下文管理] CQS法人户数场景保留 version_code，不执行丢弃")
                             context.slots_to_discard = discarded
                             _async_log_util.info(f"[上下文管理] 语义仲裁：应丢弃槽位 {discarded}")
             except Exception as e:

@@ -723,12 +723,45 @@ def get_table_schema_for_tables(session: SessionDep, current_user: CurrentUser, 
         if "." in t:
             t = t.split(".")[-1]
         normalized_want.add(t.lower())
+    logging.getLogger(__name__).info(
+        f"[表结构-指定表] 入参 table_names={table_names} | normalized={list(normalized_want)}"
+    )
     schema_str = ""
+    matched_names = []
+    matched_field_names = {}
     for obj in table_objs:
         name = (obj.table.table_name or "").lower()
         if name in normalized_want:
             schema_str += _build_schema_table_str(obj, ds, db_name)
+            matched_names.append(obj.table.table_name)
+            matched_field_names[obj.table.table_name] = [f.field_name for f in (obj.fields or []) if getattr(f, "field_name", None)]
+    logging.getLogger(__name__).info(
+        f"[表结构-指定表] 命中表={matched_names} | hit_count={len(matched_names)} | schema_len={len(schema_str)}"
+    )
+    if matched_field_names:
+        logging.getLogger(__name__).info(
+            f"[表结构-指定表] 命中表字段={ {k: v[:80] for k, v in matched_field_names.items()} }"
+        )
     return schema_str
+
+
+def get_table_schema_candidates(session: SessionDep, current_user: CurrentUser, ds: CoreDatasource) -> List[dict]:
+    """
+    返回用于“LLM 选表”的候选表信息。
+    每项包含表名、表注释、完整 schema 片段。
+    """
+    table_objs = get_table_obj_by_ds(session=session, current_user=current_user, ds=ds)
+    if not table_objs:
+        return []
+    db_name = table_objs[0].schema
+    candidates: List[dict] = []
+    for obj in table_objs:
+        candidates.append({
+            "table_name": obj.table.table_name,
+            "table_comment": (obj.table.custom_comment or obj.table.table_comment or "").strip(),
+            "schema_table": _build_schema_table_str(obj, ds, db_name),
+        })
+    return candidates
 
 
 def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDatasource, question: str,

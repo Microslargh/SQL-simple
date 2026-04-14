@@ -49,7 +49,7 @@ except ImportError:
     find_custom_prompts = None
     CustomPromptTypeEnum = None
 from apps.data_training.curd.data_training import get_training_template, get_training_template_with_data, to_xml_string
-from apps.datasource.crud.datasource import get_table_schema, get_table_schema_for_tables, get_table_schema_for_guess
+from apps.datasource.crud.datasource import get_table_schema, get_table_schema_for_tables, get_table_schema_for_guess, get_table_schema_candidates
 from apps.datasource.crud.permission import get_row_permission_filters, is_normal_user
 from apps.datasource.embedding.ds_embedding import get_ds_embedding
 from apps.datasource.models.datasource import CoreDatasource
@@ -155,6 +155,16 @@ class LLMService:
         # 检查权限：只有创建者才能访问
         if chat.create_by != current_user.id:
             raise SingleMessageError(f"Permission denied: You don't have permission to access this chat")
+        if config is None:
+            raise SingleMessageError("LLM config is required")
+        # 先初始化模型实例：后续表结构检索可能走 LLM 选表节点
+        self.chat_question = chat_question
+        self.config = config
+        self.chat_question.ai_modal_id = self.config.model_id
+        self.chat_question.ai_modal_name = self.config.model_name
+        llm_instance = LLMFactory.create_llm(self.config)
+        self.llm = llm_instance.llm
+
         ds: CoreDatasource | AssistantOutDsSchema | None = None
         if chat.datasource:
             # Get available datasource
@@ -171,8 +181,10 @@ class LLMService:
                 if not ds:
                     raise SingleMessageError("No available datasource configuration found")
                 chat_question.engine = (ds.type_name if ds.type != 'excel' else 'PostgreSQL') + get_version(ds)
-                chat_question.db_schema = get_table_schema(session=self.session, current_user=current_user, ds=ds,
-                                                           question=chat_question.question, embedding=embedding)
+                self.ds = CoreDatasource(**ds.model_dump())
+                # 不在初始化阶段做选表/检索，避免非 SQL 主链路（如猜你想问）触发额外选表请求
+                # 统一在 run_task 的 schema_retrieval 节点解析 db_schema
+                chat_question.db_schema = ""
 
         self.generate_sql_logs = list_generate_sql_logs(session=self.session, chart_id=chat_id, current_user=current_user)
         self.generate_chart_logs = list_generate_chart_logs(session=self.session, chart_id=chat_id, current_user=current_user)
@@ -182,21 +194,12 @@ class LLMService:
         chat_question.lang = get_lang_name(current_user.language)
 
         self.ds = (ds if isinstance(ds, AssistantOutDsSchema) else CoreDatasource(**ds.model_dump())) if ds else None
-        self.chat_question = chat_question
-        self.config = config
         if no_reasoning:
             # only work while using qwen
             if self.config.additional_params:
                 if self.config.additional_params.get('extra_body'):
                     if self.config.additional_params.get('extra_body').get('enable_thinking'):
                         del self.config.additional_params['extra_body']['enable_thinking']
-
-        self.chat_question.ai_modal_id = self.config.model_id
-        self.chat_question.ai_modal_name = self.config.model_name
-
-        # Create LLM instance through factory
-        llm_instance = LLMFactory.create_llm(self.config)
-        self.llm = llm_instance.llm
 
         # get last_execute_sql_error
         last_execute_sql_error = get_last_execute_sql_error(self.session, self.chat_question.chat_id, current_user)
@@ -243,7 +246,7 @@ class LLMService:
             )
             messages = [SystemMessage(content=sys_content), HumanMessage(content=user_content)]
             response = self.llm.invoke(messages)
-            enhanced = (getattr(response, 'content', None) or '').strip()
+            enhanced = self._extract_message_text(response)
             if enhanced and enhanced != current_question:
                 _async_log_util.info(f"[问题增强-LLM] 原始: {current_question}")
                 _async_log_util.info(f"[问题增强-LLM] 补充后: {enhanced}")
@@ -361,6 +364,678 @@ class LLMService:
 
         for chunk in self.llm.stream(messages):
             yield chunk
+
+    @staticmethod
+    def _extract_message_text(msg: Any) -> str:
+        """兼容 content/reasoning/tool_calls 的统一文本提取。"""
+        content_obj = getattr(msg, "content", None)
+        if isinstance(content_obj, str) and content_obj.strip():
+            return content_obj.strip()
+        if isinstance(content_obj, list):
+            parts: List[str] = []
+            for item in content_obj:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict):
+                    txt = item.get("text") or item.get("content") or item.get("value")
+                    if txt:
+                        parts.append(str(txt).strip())
+            if parts:
+                return "\n".join(parts).strip()
+        if isinstance(content_obj, dict):
+            txt = content_obj.get("text") or content_obj.get("content") or content_obj.get("value")
+            if txt:
+                return str(txt).strip()
+
+        # 部分 vLLM/Qwen 网关：content 为空，正文在 reasoning（与 raw HTTP 一致）
+        for attr in ("reasoning_content", "reasoning"):
+            v = getattr(msg, attr, None)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
+        additional = getattr(msg, "additional_kwargs", None) or {}
+        parsed = additional.get("parsed")
+        if parsed:
+            try:
+                return orjson.dumps(parsed).decode()
+            except Exception:
+                return str(parsed).strip()
+        for k in ("output_text", "text", "response", "message", "reasoning_content", "reasoning"):
+            v = additional.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        tool_calls = additional.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str) and args.strip():
+                    return args.strip()
+        return str(content_obj or "").strip()
+
+    @staticmethod
+    def _extract_text_from_raw_api_message(msg: Any) -> str:
+        """
+        从 OpenAI 兼容 HTTP 返回的 message 对象中提取可解析文本。
+        与 _extract_message_text 对齐：支持字符串 / 列表分片 / dict 形态 content、
+        structured outputs 的 parsed、reasoning、tool_calls 等。
+
+        常见情况（如 vLLM + Qwen）：content 为 null，助手正文仅在 reasoning 字段。
+        """
+        if not isinstance(msg, dict):
+            return ""
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict):
+                    txt = item.get("text") or item.get("content") or item.get("value")
+                    if isinstance(txt, str) and txt.strip():
+                        parts.append(txt.strip())
+            if parts:
+                return "\n".join(parts).strip()
+        if isinstance(content, dict):
+            txt = content.get("text") or content.get("content") or content.get("value")
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
+        parsed = msg.get("parsed")
+        if parsed is not None:
+            if isinstance(parsed, (dict, list)):
+                try:
+                    return orjson.dumps(parsed).decode()
+                except Exception:
+                    return str(parsed).strip()
+            if isinstance(parsed, str) and parsed.strip():
+                return parsed.strip()
+        reasoning = msg.get("reasoning") or msg.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+        for k in ("output_text", "text", "response"):
+            v = msg.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        tool_calls = msg.get("tool_calls") or []
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                fn = (tc or {}).get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str) and args.strip():
+                    return args.strip()
+        function_call = msg.get("function_call") or {}
+        args = function_call.get("arguments")
+        if isinstance(args, str) and args.strip():
+            return args.strip()
+        return ""
+
+    def _invoke_openai_compatible_raw(
+            self,
+            messages: List[dict[str, str]],
+            response_format: Optional[dict] = None,
+            timeout_sec: int = 20,
+    ) -> str:
+        """
+        绕过 LangChain 消息适配层，直接调用 OpenAI 兼容接口并提取文本。
+        兼容 content（含列表分片）/parsed/reasoning/reasoning_content/tool_calls/function_call。
+        """
+        if not self.config or not self.config.api_base_url:
+            return ""
+        base = (self.config.api_base_url or "").strip().rstrip("/")
+        if base.endswith("/chat/completions"):
+            url = base
+        elif base.endswith("/v1"):
+            url = f"{base}/chat/completions"
+        else:
+            url = f"{base}/v1/chat/completions"
+
+        payload: dict[str, Any] = {
+            "model": (self.config.model_name or "").strip(),
+            "messages": messages,
+            "stream": False,
+        }
+        # 透传模型配置中的附加参数（如 extra_body 等）
+        if getattr(self.config, "additional_params", None):
+            payload.update(self.config.additional_params or {})
+        if response_format:
+            payload["response_format"] = response_format
+
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+
+        try:
+            # 使用(connect_timeout, read_timeout)避免长时间无响应挂起
+            resp = requests.post(url, headers=headers, json=payload, timeout=(5, timeout_sec))
+            resp.raise_for_status()
+            data = resp.json()
+            choices = data.get("choices") or []
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                msg = choice.get("message") or {}
+                text = self._extract_text_from_raw_api_message(msg if isinstance(msg, dict) else {})
+                if text:
+                    return text
+                legacy = choice.get("text")
+                if isinstance(legacy, str) and legacy.strip():
+                    return legacy.strip()
+            if choices:
+                first = choices[0] if isinstance(choices[0], dict) else {}
+                m = first.get("message") if isinstance(first, dict) else {}
+                _async_log_util.warning(
+                    f"[raw_http] 助手消息无可用文本 | finish_reason={first.get('finish_reason')!r} "
+                    f"| message_keys={list(m.keys()) if isinstance(m, dict) else 'n/a'}"
+                )
+            return ""
+        except Exception as e:
+            _async_log_util.warning(f"[raw_http] OpenAI 兼容请求失败: {e}")
+            return ""
+
+    @staticmethod
+    def _table_selector_response_format() -> dict:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sqlbot_table_selector",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "tables": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["tables"],
+                    "additionalProperties": False
+                }
+            }
+        }
+
+    def _terminology_snippet_for_table_selector(self, question: str) -> str:
+        """
+        优先复用当前流程已检索好的术语结果（self.chat_question.terminologies），
+        直接注入到 LLM 选表提示词中，避免重复检索。
+        """
+        try:
+            terms = (self.chat_question.terminologies or "").strip()
+            if not terms:
+                return ""
+            # 术语模板本身为结构化文本（XML片段），按既有流程原样注入即可。
+            return "\n\n术语参考（来自术语检索结果）：\n" + terms + "\n"
+        except Exception:
+            return ""
+
+    def _select_tables_by_llm(self, question: str) -> List[str]:
+        """
+        使用 LLM 从当前数据源所有候选表中选择最相关表名。
+        失败时返回空列表，由调用方决定回退策略。
+        """
+        if not self.ds or not getattr(settings, "TABLE_SELECTOR_LLM_ENABLED", False):
+            return []
+
+        try:
+            _async_log_util.info("[LLM选表] 开始执行选表")
+            candidates = get_table_schema_candidates(
+                session=self.session,
+                current_user=self.current_user,
+                ds=self.ds
+            )
+            if not candidates:
+                _async_log_util.warning("[LLM选表] 候选表为空，跳过选表")
+                return []
+
+            # 十几张表场景：直接把全部候选摘要给 LLM
+            # 控制输入长度：每张表最多展示前 12 行 schema 片段
+            table_blocks = []
+            valid_table_names = set()
+            candidate_names = []
+            for c in candidates:
+                name = (c.get("table_name") or "").strip()
+                if not name:
+                    continue
+                valid_table_names.add(name.lower())
+                candidate_names.append(name)
+                schema_table = c.get("schema_table") or ""
+                brief = "\n".join(schema_table.splitlines()[:12])
+                table_blocks.append(brief)
+
+            if not table_blocks:
+                _async_log_util.warning("[LLM选表] 候选表摘要为空，跳过选表")
+                return []
+
+            topk = max(1, int(getattr(settings, "TABLE_SELECTOR_LLM_TOPK", 1) or 1))
+            # 强约束：选表节点固定返回 1 张表，避免空值影响下游
+            topk = 1
+            terminology_snippet = self._terminology_snippet_for_table_selector(question or "")
+            system_prompt = (
+                "你是 SQL 选表器。根据用户问题，从候选表中选出最相关的表名。"
+                "只允许从候选列表中选择，不得编造。"
+                "必须返回且仅返回 1 个表名，不能为空。"
+                f"返回 JSON: {{\"tables\": [\"table_name\"]}}，长度必须为 {topk}。"
+            )
+            if terminology_snippet.strip():
+                system_prompt += " 若用户消息中提供了业务术语说明，请结合术语含义理解指标与维度后再选表。"
+            user_prompt = (
+                " 表规范："
+                "1. 表格名称规则为dwm_ai_wenshu_xxx_[group/company/region]_[month/year/constant],  代表主键为公司，集团，区域。周期为月，年，固定。"
+                "2. 一般而言，公司名company_name，集团名group_name是表的主键，月度日期字段datetime_month，年度日期字段是datetime_year"
+                "3. 字段注释必定包含的字段名，有可能包含，别名，信息，备注等别的额外信息"
+                "选表规则："
+                "1. 年度问题优先使用年表（year），如果没有提供对应的年表，再选择月表"
+                "2. 集团问题优先使用集团表（group），如果没有提供对应的集团表，再使用公司表/区域表"
+                "3. 表选择要考虑表注释，和字段注释。特别是表注释的周期，维度，相关问题。字段注释的字段名，别名，备注信息。"
+                "相关术语："
+                + terminology_snippet + "\n"
+                f"用户问题：{question or ''}\n\n"
+                "候选表结构（节选）：\n"
+                + "\n".join(table_blocks)
+            )
+
+            # 选表优先走 raw_http（有明确 timeout），避免 LangChain client 重试导致长时间阻塞
+            _async_log_util.info("[LLM选表] 调用模型（structured）")
+            raw = self._invoke_openai_compatible_raw(
+                messages=[
+                    {"role": "system", "content": system_prompt + " 不要输出解释，只输出纯JSON。"},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format=self._table_selector_response_format(),
+                timeout_sec=15,
+            )
+            # 无结构化结果时再试一次普通 JSON 返回
+            if not raw:
+                _async_log_util.info("[LLM选表] structured为空，调用模型（plain_json）")
+                raw = self._invoke_openai_compatible_raw(
+                    messages=[
+                        {"role": "system", "content": system_prompt + " 不要输出解释，只输出纯JSON。"},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format=None,
+                    timeout_sec=15,
+                )
+            tables: List[Any] = []
+            if raw:
+                json_str = extract_nested_json(raw) or raw
+                data = orjson.loads(json_str)
+                tables = data.get("tables", []) if isinstance(data, dict) else []
+            if not isinstance(tables, list):
+                tables = []
+
+            def _normalize_selected(raw_tables: List[Any]) -> List[str]:
+                selected = []
+                for t in raw_tables:
+                    name = str(t or "").strip().strip('"').strip("'")
+                    if not name:
+                        continue
+                    key = name.split(".")[-1].lower()
+                    if key in valid_table_names and key not in [s.lower() for s in selected]:
+                        selected.append(name.split(".")[-1])
+                    if len(selected) >= topk:
+                        break
+                return selected
+
+            selected = _normalize_selected(tables)
+
+            # 强制二次修正：若仍无结果，用“候选表名清单 + 闭集输出”再问一次
+            if not selected:
+                enforce_system = (
+                    "你是 SQL 选表器。必须从给定候选表名中选择且仅选择一个。"
+                    "禁止返回空值，禁止返回候选外名称。"
+                    "只返回 JSON: {\"tables\": [\"table_name\"]}"
+                )
+                enforce_user = (
+                    f"用户问题：{question or ''}\n"
+                    f"候选表名：{candidate_names}\n"
+                    "请只返回1个最相关表名。"
+                    + terminology_snippet
+                )
+                enforce_msg = self.llm.invoke([
+                    SystemMessage(content=enforce_system),
+                    HumanMessage(content=enforce_user),
+                ])
+                enforce_raw = self._extract_message_text(enforce_msg)
+                if not enforce_raw:
+                    _async_log_util.info("[LLM选表] force_pick_one 调用模型（structured）")
+                    enforce_raw = self._invoke_openai_compatible_raw(
+                        messages=[
+                            {"role": "system", "content": enforce_system},
+                            {"role": "user", "content": enforce_user},
+                        ],
+                        response_format=self._table_selector_response_format(),
+                        timeout_sec=12,
+                    )
+                if enforce_raw:
+                    try:
+                        enforce_json = extract_nested_json(enforce_raw) or enforce_raw
+                        enforce_data = orjson.loads(enforce_json)
+                        enforce_tables = enforce_data.get("tables", []) if isinstance(enforce_data, dict) else []
+                        if isinstance(enforce_tables, list):
+                            selected = _normalize_selected(enforce_tables)
+                    except Exception:
+                        pass
+
+            # 最终兜底：保证永远返回 1 张有效表
+            if not selected and candidate_names:
+                q = (question or "").lower()
+                preferred = None
+                for n in candidate_names:
+                    n_low = n.lower()
+                    if ("group" in q or "集团" in q) and "group" in n_low:
+                        preferred = n
+                        break
+                    if ("company" in q or "公司" in q) and "company" in n_low:
+                        preferred = n
+                        break
+                    if ("region" in q or "地区" in q or "区域" in q) and "region" in n_low:
+                        preferred = n
+                        break
+                    if ("year" in q or "年" in q) and "year" in n_low:
+                        preferred = n
+                        break
+                    if ("month" in q or "月" in q) and "month" in n_low:
+                        preferred = n
+                        break
+                selected = [preferred or candidate_names[0]]
+                _async_log_util.warning(f"[LLM选表] 模型未返回有效表，使用兜底表: {selected[0]}")
+
+            _async_log_util.info(f"[LLM选表] 选表完成: {selected}")
+            return selected
+        except Exception as e:
+            _async_log_util.warning(f"[LLM选表] 选表失败，回退默认检索: {str(e)}")
+            return []
+
+    def _resolve_db_schema_for_sql(self, question: str, embedding: bool = True) -> str:
+        """
+        SQL 生成前统一的表结构解析入口：
+        1) 动态数据源：沿用外部 schema；
+        2) 普通数据源：优先 LLM 选表 -> 指定表 schema；
+        3) 选表失败：按 strict 开关决定回退或报错。
+        """
+        _async_log_util.info(
+            f"[表结构获取][入口] selector_enabled={getattr(settings, 'TABLE_SELECTOR_LLM_ENABLED', False)} "
+            f"| strict={getattr(settings, 'TABLE_SELECTOR_LLM_STRICT', True)} "
+            f"| embedding={embedding} | question_len={len(question or '')}"
+        )
+
+        if self.out_ds_instance:
+            _async_log_util.info("[表结构获取] 使用外部数据源 schema（out_ds_instance）")
+            return self.out_ds_instance.get_db_schema(self.ds.id)
+
+        if getattr(settings, "TABLE_SELECTOR_LLM_ENABLED", False):
+            selected_tables = self._select_tables_by_llm(question or "")
+            if selected_tables:
+                schema = get_table_schema_for_tables(
+                    session=self.session,
+                    current_user=self.current_user,
+                    ds=self.ds,
+                    table_names=selected_tables,
+                )
+                if schema and schema.strip():
+                    return schema
+                _async_log_util.warning(
+                    f"[表结构获取] 指定表schema为空 | selected_tables={selected_tables} | schema_len={len(schema or '')}"
+                )
+            if getattr(settings, "TABLE_SELECTOR_LLM_STRICT", True):
+                raise SingleMessageError("LLM table selection failed: no valid table selected")
+            _async_log_util.warning("[LLM选表] 未选中有效表，回退默认表结构检索")
+        else:
+            _async_log_util.info("[表结构获取] TABLE_SELECTOR_LLM_ENABLED=False，跳过 LLM 选表")
+
+        return get_table_schema(
+            session=self.session,
+            current_user=self.current_user,
+            ds=self.ds,
+            question=question,
+            embedding=embedding
+        )
+
+    @staticmethod
+    def _basic_sql_sanity_error(sql: str) -> Optional[str]:
+        """
+        轻量语法体检：用于在落库前提前拦截常见拼接错误。
+        """
+        if not sql or not sql.strip():
+            return "SQL is empty"
+        s = sql.strip()
+        if re.search(r'\bAS\s+"[^"]*"\s+AS\s+"[^"]*"', s, re.IGNORECASE):
+            return "SQL contains duplicated alias assignment (AS ... AS ...)"
+        if s.count("(") != s.count(")"):
+            return "SQL has unbalanced parentheses"
+        if s.count("'") % 2 != 0:
+            return "SQL has unmatched single quote"
+        return None
+
+    def _build_syntax_check_sql(self, sql: str) -> Optional[str]:
+        """
+        为不同引擎构造“仅语法检查”语句（不执行原查询数据扫描）。
+        返回 None 表示当前引擎暂不支持专用语法检查，交由后续执行阶段兜底。
+        """
+        if not self.ds or not getattr(self.ds, "type", None):
+            return None
+        origin_sql = (sql or "").strip().rstrip(";")
+        if not origin_sql:
+            return None
+        ds_type = (self.ds.type or "").lower()
+
+        # 优先覆盖当前项目常见引擎；ClickHouse 用 EXPLAIN SYNTAX 最稳
+        if ds_type == "ck":
+            return f"EXPLAIN SYNTAX {origin_sql}"
+        if ds_type in {"mysql", "doris", "pg", "redshift", "kingbase", "excel"}:
+            return f"EXPLAIN {origin_sql}"
+        if ds_type == "sqlserver":
+            return f"SET PARSEONLY ON; {origin_sql}; SET PARSEONLY OFF;"
+        if ds_type == "oracle":
+            return f"EXPLAIN PLAN FOR {origin_sql}"
+        # dm/es 等引擎不统一，先返回 None
+        return None
+
+    def _db_syntax_error(self, sql: str) -> Optional[str]:
+        """
+        使用数据库语法器做一手校验（第一性原则）：能通过数据库解析才算可执行 SQL。
+        """
+        check_sql = self._build_syntax_check_sql(sql)
+        if not check_sql:
+            return None
+        try:
+            exec_sql(self.ds, check_sql, True)
+            return None
+        except Exception as e:
+            return str(e)
+
+    @staticmethod
+    def _classify_sql_error(error_msg: str) -> tuple[str, str]:
+        """
+        将数据库报错归类，返回 (error_type, fix_hint)。
+        """
+        msg = (error_msg or "").lower()
+        if any(k in msg for k in ["syntax", "parse", "parser", "token", "unexpected", "expected"]):
+            return "syntax_error", "修复 SQL 语法结构（关键字、逗号、括号、别名、引号）"
+        if any(k in msg for k in ["unknown column", "column not found", "no such column", "cannot find column"]):
+            return "missing_column", "仅使用 schema 中存在的字段，修复拼写或改用正确字段"
+        if any(k in msg for k in ["unknown table", "table not found", "no such table", "relation does not exist"]):
+            return "missing_table", "仅使用已提供的表名，修复库名/表名拼写和引用方式"
+        if any(k in msg for k in ["unknown function", "function not found", "no function matches", "unsupported function"]):
+            return "unsupported_function", "改用当前数据库支持的等价函数"
+        if any(k in msg for k in ["ambiguous", "is ambiguous"]):
+            return "ambiguous_reference", "为冲突字段补充表别名，消除歧义"
+        if any(k in msg for k in ["duplicate", "already exists", "duplicated alias", "multiple aliases"]):
+            return "duplicate_alias", "移除重复别名/重复字段定义，保证每个表达式别名唯一"
+        return "other_error", "在不改变业务语义的前提下修复可执行性问题"
+
+    def _repair_sql_answer_once(self, raw_answer: str, error_msg: str) -> str:
+        """
+        让 LLM 基于错误信息修复 SQL，要求只返回结构化 JSON。
+        """
+        error_type, fix_hint = self._classify_sql_error(error_msg)
+        _async_log_util.info(
+            f"[SQL自动修复] 开始修复 | error_type={error_type} | error_msg={error_msg[:500]}"
+        )
+        _async_log_util.info(
+            f"[SQL自动修复][输入-原始回答] {str(raw_answer)[:1500]}"
+        )
+        system_prompt = (
+            "你是 SQL 语法修复器。"
+            "你会收到一个 SQLBot 的原始 JSON/文本回答和错误信息。"
+            "请只修复 SQL 语法，不改变查询语义、筛选条件、指标和表名。"
+            f"错误类型：{error_type}。修复目标：{fix_hint}。"
+            "只返回 JSON 对象，格式："
+            "{\"success\": true, \"sql\": \"...\", \"tables\": [\"...\"], \"chart-type\": \"table\"}。"
+        )
+        user_prompt = (
+            f"数据库引擎：{self.chat_question.engine}\n"
+            f"错误信息：{error_msg}\n"
+            f"原始回答：\n{raw_answer}\n"
+        )
+        msgs = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+        repair_llm = self.llm.bind(response_format=self._sql_json_response_format())
+        msg = repair_llm.invoke(msgs)
+        fixed = self._extract_message_text(msg)
+        if not fixed:
+            _async_log_util.warning("[SQL自动修复] response_format 返回空内容，回退 plain_json 重试")
+            plain_msg = self.llm.invoke([
+                SystemMessage(content=system_prompt + " 不要输出解释，只输出纯JSON。"),
+                HumanMessage(content=user_prompt),
+            ])
+            fixed = self._extract_message_text(plain_msg)
+        if not fixed:
+            raise SingleMessageError("SQL auto-fix returned empty content")
+        _async_log_util.info(
+            f"[SQL自动修复][输出-修复回答] {fixed[:1500]}"
+        )
+        return fixed
+
+    def _deterministic_sql_fix(self, raw_answer: str, error_msg: str) -> Optional[str]:
+        """
+        规则化兜底修复（当 LLM 修复无效时使用），优先处理高频方言错误。
+        当前覆盖：ClickHouse 中未加引号的中文别名导致语法错误。
+        """
+        try:
+            sql, tables = self.check_sql(raw_answer)
+        except Exception:
+            return None
+
+        ds_type = (getattr(self.ds, "type", "") or "").lower()
+        msg = (error_msg or "").lower()
+        fixed_sql = sql
+
+        # ClickHouse: AS 后中文别名需加双引号
+        # 例：AS 主键_公司名, -> AS "主键_公司名",
+        if ds_type == "ck":
+            # 匹配 AS 后跟中文或特殊字符的别名，处理多种边界情况
+            # 场景1: AS 中文别名,  → AS "中文别名",
+            # 场景2: AS 中文别名\n → AS "中文别名"
+            # 场景3: AS 中文别名 FROM → AS "中文别名" FROM
+            def fix_clickhouse_alias(sql_text: str) -> str:
+                # 分多轮处理，确保各种边界情况都被覆盖
+                # 第一轮：处理 AS 别名, 或 AS 别名\n 的情况
+                pattern1 = r'(?i)\bAS\s+([\u4e00-\u9fff][^,\n\r]*?)(?=\s*,|\s*\n|\s+FROM|\s+WHERE|\s+GROUP|\s+ORDER|\s+HAVING|\s+LIMIT|\s*$)'
+
+                def replace_alias(m):
+                    alias = m.group(1).strip()
+                    # 如果已经加引号了，跳过
+                    if (alias.startswith('"') and alias.endswith('"')) or \
+                       (alias.startswith('`') and alias.endswith('`')):
+                        return m.group(0)
+                    return f'AS "{alias}"'
+
+                result = re.sub(pattern1, replace_alias, sql_text)
+
+                # 第二轮：处理可能残留的 AS 别名（更宽松的匹配）
+                # 匹配 AS 后跟连续的非空白字符（包含中文）
+                pattern2 = r'(?i)\bAS\s+([\u4e00-\u9fff][^\s,;)]*)'
+
+                def replace_alias2(m):
+                    alias = m.group(1).strip()
+                    # 如果已经加引号了，跳过
+                    if (alias.startswith('"') and alias.endswith('"')) or \
+                       (alias.startswith('`') and alias.endswith('`')):
+                        return m.group(0)
+                    # 如果包含中文，加引号
+                    if re.search(r'[\u4e00-\u9fff]', alias):
+                        return f'AS "{alias}"'
+                    return m.group(0)
+
+                result = re.sub(pattern2, replace_alias2, result)
+                return result
+
+            fixed_sql = fix_clickhouse_alias(fixed_sql)
+
+            if fixed_sql != sql:
+                _async_log_util.info(f"[SQL自动修复][规则修复] ClickHouse中文别名加引号 | 原SQL前200字符: {sql[:200]}")
+
+        if fixed_sql == sql:
+            return None
+
+        repaired = {
+            "success": True,
+            "sql": fixed_sql,
+            "tables": tables if isinstance(tables, list) else [],
+            "chart-type": "table"
+        }
+        out = orjson.dumps(repaired).decode()
+        _async_log_util.info(f"[SQL自动修复][规则兜底输出] {out[:1500]}")
+        return out
+
+    def _validate_and_autofix_sql_answer(
+            self,
+            raw_answer: str,
+            max_retries: int = 1
+    ) -> tuple[str, int]:
+        """
+        在 check_save_sql 之前执行：
+        - 校验 answer 可解析且 SQL 无明显语法错误
+        - 失败则自动修复并重试
+        返回：最终可用 answer 文本、修复次数
+        """
+        attempts = max(0, int(max_retries))
+        current = raw_answer
+        fixed_times = 0
+        last_error = ""
+        _async_log_util.info(
+            f"[SQL自动修复] 进入校验链路 | max_retries={attempts} | raw_answer_preview={str(raw_answer)[:1000]}"
+        )
+
+        for idx in range(attempts + 1):
+            try:
+                sql, _ = self.check_sql(current)
+                _async_log_util.info(
+                    f"[SQL自动修复][第{idx + 1}次] 解析SQL成功 | sql_preview={sql[:1200]}"
+                )
+                syntax_error = self._basic_sql_sanity_error(sql)
+                if syntax_error:
+                    raise SingleMessageError(syntax_error)
+                db_syntax_error = self._db_syntax_error(sql)
+                if db_syntax_error:
+                    raise SingleMessageError(f"Database parser error: {db_syntax_error}")
+                _async_log_util.info(
+                    f"[SQL自动修复][第{idx + 1}次] 校验通过 | fixed_times={fixed_times}"
+                )
+                return current, fixed_times
+            except Exception as e:
+                last_error = str(e)
+                _async_log_util.warning(
+                    f"[SQL自动修复][第{idx + 1}次] 校验失败 | error={last_error[:500]}"
+                )
+                if idx >= attempts:
+                    break
+                repaired = self._repair_sql_answer_once(current, last_error)
+                if repaired.strip() == (current or "").strip():
+                    # LLM 修复无变化时，触发规则化兜底，避免无效重试循环
+                    deterministic = self._deterministic_sql_fix(current, last_error)
+                    if deterministic:
+                        current = deterministic
+                    else:
+                        current = repaired
+                else:
+                    current = repaired
+                fixed_times += 1
+                _async_log_util.info(
+                    f"[SQL自动修复][第{idx + 1}次] 已完成自动修复，准备重试"
+                )
+
+        raise SingleMessageError(f"SQL auto-fix failed: {last_error}")
 
     def init_messages(self):
         """初始化SQL生成消息，使用智能上下文管理"""
@@ -1106,10 +1781,7 @@ class LLMService:
 
         try:
             resp = self.llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
-            text = ""
-            if hasattr(resp, "content"):
-                text = resp.content if isinstance(resp.content, str) else str(resp.content)
-            text = (text or "").strip()
+            text = self._extract_message_text(resp)
             if text:
                 # 兜底：仅在“数据未提供占比/分母”时，改写占比句子为“无法计算占比”，避免误杀正常占比问题
                 cleaned = self._sanitize_percent_claims(
@@ -1193,9 +1865,7 @@ class LLMService:
         )
         try:
             resp = self.llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
-            resp_text = ""
-            if hasattr(resp, "content"):
-                resp_text = resp.content if isinstance(resp.content, str) else str(resp.content)
+            resp_text = self._extract_message_text(resp)
             sql = self._extract_sql_text(resp_text)
             if not sql:
                 return False
@@ -1432,9 +2102,10 @@ class LLMService:
                     self.ds = CoreDatasource(**_ds.model_dump())
                     self.chat_question.engine = (_ds.type_name if _ds.type != 'excel' else 'PostgreSQL') + get_version(
                         self.ds)
-                    self.chat_question.db_schema = get_table_schema(session=self.session,
-                                                                    current_user=self.current_user, ds=self.ds,
-                                                                    question=self.chat_question.question)
+                    self.chat_question.db_schema = self._resolve_db_schema_for_sql(
+                        question=self.chat_question.question or "",
+                        embedding=True
+                    )
                     _engine_type = self.chat_question.engine
                     _chat.engine_type = _ds.type_name
                 # save chat
@@ -1592,46 +2263,47 @@ class LLMService:
             )
             return False
 
-        # 范围限定词预检：模板含「海外/境外/境内/国内」而用户未提及，直接判不匹配
-        _SCOPE_KEYWORDS = ("海外", "境外", "境内", "国内")
-        for kw in _SCOPE_KEYWORDS:
-            if kw in template_question and kw not in user_question:
+        if getattr(settings, "LEGACY_DOMAIN_RULES_ENABLED", False):
+            # 范围限定词预检：模板含「海外/境外/境内/国内」而用户未提及，直接判不匹配
+            _SCOPE_KEYWORDS = ("海外", "境外", "境内", "国内")
+            for kw in _SCOPE_KEYWORDS:
+                if kw in template_question and kw not in user_question:
+                    _async_log_util.info(
+                        f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                        f"模板含「{kw}」而用户问题未提及，直接判不匹配"
+                    )
+                    self._trace_end(
+                        trace,
+                        output_payload={"matched": False, "reason": f"scope_keyword_missing:{kw}"},
+                    )
+                    return False
+
+            # 统计口径预检：并表 vs 非并表 互斥（SQL 筛选条件不同，不能混用）
+            _CONSOLIDATED_MARKERS = ("并表", "合并")
+            user_has_consolidated = any(m in user_question for m in _CONSOLIDATED_MARKERS)
+            template_has_consolidated = any(m in template_question for m in _CONSOLIDATED_MARKERS)
+            if user_has_consolidated != template_has_consolidated:
                 _async_log_util.info(
                     f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
-                    f"模板含「{kw}」而用户问题未提及，直接判不匹配"
+                    f"并表口径不一致: 用户含并表={user_has_consolidated}, 模板含并表={template_has_consolidated}"
                 )
                 self._trace_end(
                     trace,
-                    output_payload={"matched": False, "reason": f"scope_keyword_missing:{kw}"},
+                    output_payload={"matched": False, "reason": "consolidated_mismatch"},
                 )
                 return False
 
-        # 统计口径预检：并表 vs 非并表 互斥（SQL 筛选条件不同，不能混用）
-        _CONSOLIDATED_MARKERS = ("并表", "合并")
-        user_has_consolidated = any(m in user_question for m in _CONSOLIDATED_MARKERS)
-        template_has_consolidated = any(m in template_question for m in _CONSOLIDATED_MARKERS)
-        if user_has_consolidated != template_has_consolidated:
-            _async_log_util.info(
-                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
-                f"并表口径不一致: 用户含并表={user_has_consolidated}, 模板含并表={template_has_consolidated}"
-            )
-            self._trace_end(
-                trace,
-                output_payload={"matched": False, "reason": "consolidated_mismatch"},
-            )
-            return False
-
-        # 存续口径预检：模板含「存续」而用户未提、或用户含「存续」而模板未提，均不匹配（SQL 筛选不同）
-        if ("存续" in template_question) != ("存续" in user_question):
-            _async_log_util.info(
-                f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
-                f"存续口径不一致: 模板含存续={'存续' in template_question}, 用户含存续={'存续' in user_question}"
-            )
-            self._trace_end(
-                trace,
-                output_payload={"matched": False, "reason": "survival_scope_mismatch"},
-            )
-            return False
+            # 存续口径预检：模板含「存续」而用户未提、或用户含「存续」而模板未提，均不匹配（SQL 筛选不同）
+            if ("存续" in template_question) != ("存续" in user_question):
+                _async_log_util.info(
+                    f"[快速模板匹配] 二次校验预检不通过 - 模板ID: {template_id}, 模板问题: {template_question[:80]}, "
+                    f"存续口径不一致: 模板含存续={'存续' in template_question}, 用户含存续={'存续' in user_question}"
+                )
+                self._trace_end(
+                    trace,
+                    output_payload={"matched": False, "reason": "survival_scope_mismatch"},
+                )
+                return False
 
         # 明细 vs 汇总预检：用户要「明细/列表/导出明细」而模板问句无明细/列表/导出，不匹配（SQL 结构不同）
         _DETAIL_MARKERS = ("明细", "列表", "导出", "详情", "清单")
@@ -1884,18 +2556,30 @@ class LLMService:
         if not constructed_sql:
             _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少sql-template字段")
             raise SingleMessageError(orjson.dumps({'message': 'sql-template not found in matched data'}).decode())
-        if not default_kv:
-            _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少sql-info字段")
-            raise SingleMessageError(orjson.dumps({'message': 'sql-info not found in matched data'}).decode())
         if not tables_str:
             _async_log_util.error(f"[快速模板] 模板ID {template_id} 缺少tables字段")
             raise SingleMessageError(orjson.dumps({'message': 'tables not found in matched data'}).decode())
-        
-        update_kv = straight_dict.get("infos", {})
-        _async_log_util.info(f"[快速模板] 模板ID {template_id} - 默认参数数量: {len(default_kv) if isinstance(default_kv, dict) else 0}, 用户提供参数数量: {len(update_kv) if isinstance(update_kv, dict) else 0}")
-        tables = [i.strip().strip("'").strip('"') for i in tables_str.split(",")]
+
+        # sql-info 允许为空对象（表示该模板无需额外填槽）；仅在缺失/格式异常时报错
+        if default_kv is None:
+            default_kv = {}
         if isinstance(default_kv, str):
-            default_kv = json.loads(default_kv)
+            try:
+                default_kv = json.loads(default_kv)
+            except Exception:
+                _async_log_util.error(f"[快速模板] 模板ID {template_id} 的sql-info不是合法JSON字符串")
+                raise SingleMessageError(orjson.dumps({'message': 'invalid sql-info in matched data'}).decode())
+        if not isinstance(default_kv, dict):
+            _async_log_util.error(f"[快速模板] 模板ID {template_id} 的sql-info类型非法: {type(default_kv)}")
+            raise SingleMessageError(orjson.dumps({'message': 'invalid sql-info type in matched data'}).decode())
+
+        update_kv = straight_dict.get("infos", {})
+        if update_kv is None or not isinstance(update_kv, dict):
+            update_kv = {}
+        _async_log_util.info(
+            f"[快速模板] 模板ID {template_id} - 默认参数数量: {len(default_kv)}, 用户提供参数数量: {len(update_kv)}"
+        )
+        tables = [i.strip().strip("'").strip('"') for i in tables_str.split(",")]
         
         # 验证 update_kv 中的值是否完整（检查是否有明显的截断）
         for k, v in update_kv.items():
@@ -2275,11 +2959,22 @@ class LLMService:
 
         if sql.strip() == '':
             raise SingleMessageError("SQL query is empty")
-        return sql, data.get('tables')
+        tables = data.get('tables')
+        # 兜底：部分模型在修复后会漏掉 tables 字段，导致后续权限/图表链路信息不完整
+        if not tables or not isinstance(tables, list):
+            inferred = _parse_table_names_from_sql(sql)
+            # 仅保留纯表名，避免 schema 前缀干扰后续 in_ 查询
+            normalized = []
+            for t in inferred:
+                name = (t or "").split(".")[-1].strip().strip('"').strip("'")
+                if name and name not in normalized:
+                    normalized.append(name)
+            tables = normalized
+        return sql, tables
 
 
     @staticmethod
-    def check_straight_sql(res: str) -> tuple[bool, str, str]:
+    def check_straight_sql(res: str) -> tuple[bool, Any, Dict[str, Any]]:
         status = False
         infos = None
         matched_id = None
@@ -2310,13 +3005,18 @@ class LLMService:
                     _async_log_util.warning(f"[快速模板匹配] matched_id为None，响应: {json_str[:200]}")
                     return False, "", ""
                 
-                # 验证 infos 是否为空或无效
-                if not infos or (isinstance(infos, dict) and len(infos) == 0):
-                    _async_log_util.warning(f"[快速模板匹配] infos为空，响应: {json_str[:200]}")
-                    return False, "", ""
+                # infos 允许为空（某些模板无需额外填槽即可直接使用默认 sql-info）
+                if infos is None:
+                    infos = {}
+                if not isinstance(infos, dict):
+                    _async_log_util.warning(f"[快速模板匹配] infos类型异常（已置空字典）: {type(infos)}, 响应: {json_str[:200]}")
+                    infos = {}
                 
                 status = True
-                _async_log_util.info(f"[快速模板匹配] 匹配成功 - 模板ID: {matched_id}, 参数数量: {len(infos) if isinstance(infos, dict) else 0}")
+                _async_log_util.info(
+                    f"[快速模板匹配] 匹配成功 - 模板ID: {matched_id}, 参数数量: {len(infos)}, "
+                    f"empty_infos={'yes' if len(infos) == 0 else 'no'}"
+                )
 
         except SingleMessageError as e:
             raise e
@@ -2340,7 +3040,7 @@ class LLMService:
             data = orjson.loads(json_str)
 
             if data['success']:
-                chart_type = data['chart-type']
+                chart_type = data.get('chart-type') or 'table'
             else:
                 return None
         except Exception:
@@ -2357,7 +3057,164 @@ class LLMService:
 
         return sql
 
-    def check_save_chart(self, res: str) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_field_token(token: str) -> str:
+        token = (token or "").strip().strip('"').strip("'").strip("`").strip("[]")
+        token = token.lower()
+        token = re.sub(r"[\s\-_]+", "", token)
+        return token
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+    def _resolve_chart_display_name(self, model_name: Optional[str], resolved_value: str, chart_type: str) -> str:
+        """
+        在“保留模型生成能力”和“锚定 SQL 别名”间折中：
+        - table 场景更保守，优先避免模型把列名泛化成无关词；
+        - 非 table 场景保留模型命名（可读性优先）。
+        """
+        fallback = str(resolved_value or "").strip()
+        if not fallback:
+            return ""
+
+        raw_name = str(model_name or "").strip().strip('"').strip("'").strip("`").strip("[]")
+        if not raw_name:
+            return fallback
+        if self._normalize_field_token(raw_name) == self._normalize_field_token(fallback):
+            return raw_name
+
+        if chart_type != "table":
+            return raw_name
+
+        generic_names = {
+            "企业数量", "数量", "企业类型", "类型", "值", "数值", "指标", "维度",
+            "名称", "类别", "字段", "category", "value", "count", "type", "metric",
+        }
+        if raw_name.lower() in generic_names:
+            return fallback
+        if len(raw_name) <= 1:
+            return fallback
+
+        # 若 SQL 别名本身是中文，且模型名与其毫无中文重叠，则判定为偏差，回退到 SQL 别名。
+        if self._contains_cjk(fallback):
+            fallback_cjk = set(re.findall(r"[\u4e00-\u9fff]", fallback))
+            raw_cjk = set(re.findall(r"[\u4e00-\u9fff]", raw_name))
+            if not raw_cjk or not (fallback_cjk & raw_cjk):
+                return fallback
+        return raw_name
+
+    def _resolve_chart_field(self, value: Optional[str], name: Optional[str], result_fields: List[str]) -> Optional[str]:
+        if not result_fields:
+            return None
+        field_set = set(result_fields)
+        lower_map = {str(f).lower(): str(f) for f in result_fields}
+        norm_map: Dict[str, str] = {}
+        for f in result_fields:
+            key = self._normalize_field_token(str(f))
+            if key and key not in norm_map:
+                norm_map[key] = str(f)
+
+        candidates = [value, name]
+        for c in candidates:
+            if not c:
+                continue
+            raw = str(c).strip().strip('"').strip("'").strip("`").strip("[]")
+            if raw in field_set:
+                return raw
+            low = raw.lower()
+            if low in lower_map:
+                return lower_map[low]
+            norm = self._normalize_field_token(raw)
+            if norm in norm_map:
+                return norm_map[norm]
+        return None
+
+    def _align_chart_with_result_fields(self, chart: Dict[str, Any], result_fields: List[str]) -> Dict[str, Any]:
+        """
+        保留模型映射意图，但把 value 校正为 SQL 实际字段键，避免前端显示 '-'。
+        exec_sql(origin_column=False) 下列名会小写，此处以 result_fields 为唯一真值。
+        """
+        if not chart or not isinstance(chart, dict) or not result_fields:
+            return chart
+        corrected = 0
+        fs = [str(f) for f in result_fields]
+        field_set = set(fs)
+
+        def _value_in_fields(val: Any) -> bool:
+            if val is None or val == "":
+                return False
+            s = str(val).strip()
+            return s in field_set or s.lower() in {x.lower() for x in fs}
+
+        if chart.get("columns") and isinstance(chart.get("columns"), list):
+            orig_cols = [c for c in chart.get("columns") if isinstance(c, dict)]
+            fixed_columns: List[Dict[str, Any]] = []
+            chart_type = str(chart.get("type") or "").strip().lower()
+            for col in orig_cols:
+                resolved = self._resolve_chart_field(col.get("value"), col.get("name"), result_fields)
+                if resolved:
+                    if col.get("value") != resolved:
+                        corrected += 1
+                    col["value"] = resolved
+                    resolved_name = self._resolve_chart_display_name(col.get("name"), resolved, chart_type)
+                    if col.get("name") != resolved_name:
+                        corrected += 1
+                    col["name"] = resolved_name
+                    fixed_columns.append(col)
+            # 任一列未解析成功或全部失配：用 SQL 返回字段直映射（柱状图/折线图等与 table 共用 columns 展示）
+            if (not fixed_columns or len(fixed_columns) < len(orig_cols)) and fs:
+                fixed_columns = [{"name": f, "value": f} for f in fs]
+                corrected += len(fixed_columns)
+
+            # table 强锚定：列集合与顺序必须严格对齐 SQL 真实返回字段，避免模型把别名漂移到错误语义。
+            if chart_type == "table" and fs:
+                by_value = {}
+                for c in fixed_columns:
+                    if not isinstance(c, dict):
+                        continue
+                    v = str(c.get("value") or "").strip()
+                    if v:
+                        by_value[v] = c
+                anchored_columns: List[Dict[str, Any]] = []
+                for f in fs:
+                    mapped = by_value.get(f) or {}
+                    model_name = mapped.get("name")
+                    anchored_name = self._resolve_chart_display_name(model_name, f, chart_type)
+                    anchored_columns.append({"name": anchored_name, "value": f})
+                    if (mapped.get("value") != f) or (mapped.get("name") != anchored_name):
+                        corrected += 1
+                fixed_columns = anchored_columns
+            chart["columns"] = fixed_columns
+
+        if chart.get("axis") and isinstance(chart.get("axis"), dict):
+            for axis_key in ("x", "y", "series"):
+                axis_obj = chart.get("axis", {}).get(axis_key)
+                if not isinstance(axis_obj, dict):
+                    continue
+                resolved = self._resolve_chart_field(axis_obj.get("value"), axis_obj.get("name"), result_fields)
+                if resolved:
+                    if axis_obj.get("value") != resolved:
+                        corrected += 1
+                    axis_obj["value"] = resolved
+                    # 前端切换到 table 展示时也会使用 axis.name 作为列头，需同样锚定到 SQL 别名语义
+                    axis_name = self._resolve_chart_display_name(axis_obj.get("name"), resolved, "table")
+                    if axis_obj.get("name") != axis_name:
+                        corrected += 1
+                    axis_obj["name"] = axis_name
+                elif axis_obj.get("value") is not None and not _value_in_fields(axis_obj.get("value")):
+                    # 映射失败且当前 value 不是真实列名：按字段个数给默认轴，避免取数键为 undefined
+                    idx = {"x": 0, "y": 1, "series": 2}.get(axis_key, 0)
+                    if idx < len(fs):
+                        axis_obj["value"] = fs[idx]
+                        axis_obj["name"] = self._resolve_chart_display_name(axis_obj.get("name"), fs[idx], "table")
+                        corrected += 1
+
+        if corrected > 0:
+            _async_log_util.info(f"[图表映射纠偏] 已按SQL字段自动校正 {corrected} 处映射")
+        return chart
+
+    def check_save_chart(self, res: str, result_fields: Optional[List[str]] = None) -> Dict[str, Any]:
 
         json_str = extract_nested_json(res)
         if json_str is None:
@@ -2376,14 +3233,15 @@ class LLMService:
                 chart = data
                 if chart.get('columns'):
                     for v in chart.get('columns'):
-                        v['value'] = v.get('value').lower()
+                        if isinstance(v, dict) and v.get('value') is not None:
+                            v['value'] = str(v.get('value')).lower()
                 if chart.get('axis'):
-                    if chart.get('axis').get('x'):
-                        chart.get('axis').get('x')['value'] = chart.get('axis').get('x').get('value').lower()
-                    if chart.get('axis').get('y'):
-                        chart.get('axis').get('y')['value'] = chart.get('axis').get('y').get('value').lower()
-                    if chart.get('axis').get('series'):
-                        chart.get('axis').get('series')['value'] = chart.get('axis').get('series').get('value').lower()
+                    if chart.get('axis').get('x') and chart.get('axis').get('x').get('value') is not None:
+                        chart.get('axis').get('x')['value'] = str(chart.get('axis').get('x').get('value')).lower()
+                    if chart.get('axis').get('y') and chart.get('axis').get('y').get('value') is not None:
+                        chart.get('axis').get('y')['value'] = str(chart.get('axis').get('y').get('value')).lower()
+                    if chart.get('axis').get('series') and chart.get('axis').get('series').get('value') is not None:
+                        chart.get('axis').get('series')['value'] = str(chart.get('axis').get('series').get('value')).lower()
             elif data['type'] == 'error':
                 message = data['reason']
                 error = True
@@ -2396,6 +3254,9 @@ class LLMService:
 
         if error:
             raise SingleMessageError(message)
+
+        if result_fields:
+            chart = self._align_chart_with_result_fields(chart, [str(f) for f in result_fields])
 
         save_chart(session=self.session, chart=orjson.dumps(chart).decode(), record_id=self.record.id, current_user=self.current_user)
 
@@ -2766,16 +3627,23 @@ class LLMService:
                                                   'type': 'datasource'}).decode() + '\n\n'
 
                 _async_log_util.info(f"[表结构获取] 开始获取表结构，TABLE_EMBEDDING_ENABLED={settings.TABLE_EMBEDDING_ENABLED}")
-                self.chat_question.db_schema = self.out_ds_instance.get_db_schema(
-                    self.ds.id) if self.out_ds_instance else get_table_schema(session=self.session,
-                                                                              current_user=self.current_user,
-                                                                              ds=self.ds,
-                                                                              question=self.chat_question.question,
-                                                                              embedding=True)
+                # select_datasource() 内已对非动态数据源调用过 _resolve_db_schema_for_sql，此处避免重复 LLM 选表
+                if not (self.chat_question.db_schema or "").strip():
+                    self.chat_question.db_schema = self._resolve_db_schema_for_sql(
+                        question=self.chat_question.question or "",
+                        embedding=True
+                    )
+                else:
+                    _async_log_util.info(
+                        "[表结构获取] 数据源选择阶段已填充 db_schema，跳过重复的 _resolve_db_schema_for_sql"
+                    )
                 schema_length = len(self.chat_question.db_schema) if self.chat_question.db_schema else 0
                 _async_log_util.info(f"[表结构获取] 表结构获取完成，schema长度: {schema_length} 字符")
                 # 追问场景：确保上一轮 SQL 用到的表及其字段定义（含字段备注）被传入，避免漏传导致用错表或字段格式
-                if len(self.generate_sql_logs) > 0 and self.chat_question.db_schema and self.ds:
+                if (
+                    len(self.generate_sql_logs) > 0 and self.chat_question.db_schema and self.ds
+                    and not getattr(settings, "TABLE_SELECTOR_LLM_ENABLED", False)
+                ):
                     latest_log = self.generate_sql_logs[-1]
                     if latest_log.pid:
                         try:
@@ -2816,16 +3684,50 @@ class LLMService:
                 )
             else:
                 self.validate_history_ds()
-                self._trace_step(
-                    node_key="schema_retrieval",
-                    node_name="表结构获取",
-                    output_payload={
-                        "datasource_id": self.ds.id if self.ds else None,
-                        "schema_length": len(self.chat_question.db_schema or ""),
-                        "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
-                        "source": "preloaded",
-                    }
-                )
+                preloaded_schema = (self.chat_question.db_schema or "").strip()
+                if not preloaded_schema:
+                    _async_log_util.warning(
+                        "[表结构获取] 预加载 schema 为空，改为实时检索（含 LLM 选表）"
+                    )
+                    self.chat_question.db_schema = self._resolve_db_schema_for_sql(
+                        question=self.chat_question.question or "",
+                        embedding=True
+                    )
+                    self._trace_step(
+                        node_key="schema_retrieval",
+                        node_name="表结构获取",
+                        output_payload={
+                            "datasource_id": self.ds.id if self.ds else None,
+                            "schema_length": len(self.chat_question.db_schema or ""),
+                            "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
+                            "source": "realtime_fallback_from_empty_preloaded",
+                        }
+                    )
+                else:
+                    _async_log_util.info(
+                        f"[表结构获取] 走 preloaded 分支，跳过实时选表 | "
+                        f"schema_length={len(self.chat_question.db_schema or '')}"
+                    )
+                    self._trace_step(
+                        node_key="schema_retrieval",
+                        node_name="表结构获取",
+                        output_payload={
+                            "datasource_id": self.ds.id if self.ds else None,
+                            "schema_length": len(self.chat_question.db_schema or ""),
+                            "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
+                            "source": "preloaded",
+                        }
+                    )
+
+            # 关键修复：schema_retrieval 完成后，必须重建 prompt 消息
+            # 否则 init_messages 在前面已用空 schema 格式化，导致 {schema} 未注入到 SQL 生成节点
+            self.init_messages()
+            self.init_straight_messages()
+            _async_log_util.info(
+                f"[Prompt构建-重建] schema_retrieval后重建消息完成 | "
+                f"schema_length={len(self.chat_question.db_schema or '')} | "
+                f"sql_message_count={len(self.sql_message)} | straight_message_count={len(self.straight_messages)}"
+            )
 
             # check connection
             connected = check_connection(ds=self.ds, trans=None)
@@ -2987,6 +3889,26 @@ class LLMService:
                     return
                 # filter sql
                 # 优化：只在DEBUG模式下记录完整SQL文本
+                if getattr(settings, "SQL_AUTOFIX_ENABLED", True):
+                    if in_chat:
+                        yield 'data:' + orjson.dumps({
+                            'type': 'step-start',
+                            'step': 'sql-validation',
+                            'step_name': 'SQL校验修复',
+                            'description': '正在进行SQL语法校验...'
+                        }).decode() + '\n\n'
+                    full_sql_text, fixed_times = self._validate_and_autofix_sql_answer(
+                        full_sql_text,
+                        max_retries=int(getattr(settings, "SQL_AUTOFIX_MAX_RETRIES", 1) or 1)
+                    )
+                    if in_chat:
+                        yield 'data:' + orjson.dumps({
+                            'type': 'step-complete',
+                            'step': 'sql-validation',
+                            'step_name': 'SQL校验修复',
+                            'description': 'SQL校验通过' if fixed_times == 0 else f'SQL自动修复完成（{fixed_times}次）',
+                            'result': {'fixed_times': fixed_times}
+                        }).decode() + '\n\n'
                 chart_type = self.get_chart_type_from_sql_answer(full_sql_text)
 
             # if settings.LOG_LEVEL == "DEBUG":
@@ -3152,8 +4074,8 @@ class LLMService:
                     'step_name': '图表生成',
                     'description': '正在生成图表配置...'
                 }).decode() + '\n\n'
-            
-            # generate chart
+
+            # generate chart（包含 table），随后用 SQL 实际字段做自动纠偏
             chart_res = self.generate_chart(chart_type)
             full_chart_text = ''
             for chunk in chart_res:
@@ -3162,11 +4084,15 @@ class LLMService:
                     yield 'data:' + orjson.dumps(
                         {'content': chunk.get('content'), 'reasoning_content': chunk.get('reasoning_content'),
                          'type': 'chart-result'}).decode() + '\n\n'
-            # filter chart
-            # 优化：只在DEBUG模式下记录详细日志
+            # filter + align chart
             if settings.LOG_LEVEL == "DEBUG":
                 _async_log_util.info(full_chart_text)
-            chart = self.check_save_chart(res=full_chart_text)
+            _rf = result.get('fields') or []
+            if not _rf and result.get("data") and isinstance(result["data"], list) and result["data"]:
+                first_row = result["data"][0]
+                if isinstance(first_row, dict):
+                    _rf = list(first_row.keys())
+            chart = self.check_save_chart(res=full_chart_text, result_fields=_rf)
             if settings.LOG_LEVEL == "DEBUG":
                 _async_log_util.info(f"chart config: {chart}")
             
@@ -3302,7 +4228,21 @@ class LLMService:
             pipeline_status = ChatExecutionTraceStatus.ERROR
             error_msg: str
             if isinstance(e, SingleMessageError):
-                error_msg = str(e)
+                single_msg = str(e)
+                if any(k in single_msg for k in [
+                    "SQL auto-fix failed",
+                    "Database parser error",
+                    "Cannot parse sql from answer",
+                    "SQL query is empty",
+                ]):
+                    # 用户侧隐藏技术细节，详细原因放到 traceback，前端走“查看具体报错”弹窗
+                    error_msg = orjson.dumps({
+                        "message": "Execute SQL Failed",
+                        "traceback": single_msg,
+                        "type": "exec-sql-err"
+                    }).decode()
+                else:
+                    error_msg = single_msg
             elif isinstance(e, SQLBotDBConnectionError):
                 error_msg = orjson.dumps(
                     {'message': str(e), 'type': 'db-connection-err'}).decode()
@@ -3571,12 +4511,14 @@ def process_stream(res: Iterator[BaseMessageChunk],
         if settings.LOG_LEVEL == "DEBUG" and chunk_count % 100 == 0:
             _async_log_util.info(f"stream chunk {chunk_count}: {chunk.content[:100] if hasattr(chunk, 'content') else str(chunk)[:100]}...")
         reasoning_content_chunk = ''
-        content = chunk.content
+        content = chunk.content if isinstance(chunk.content, str) else ("" if chunk.content is None else str(chunk.content))
         output_content = ''  # 实际要输出的内容
 
         # 检查additional_kwargs中的reasoning_content
-        if 'reasoning_content' in chunk.additional_kwargs:
+        if 'reasoning_content' in chunk.additional_kwargs or 'reasoning' in chunk.additional_kwargs:
             reasoning_content = chunk.additional_kwargs.get('reasoning_content', '')
+            if not reasoning_content:
+                reasoning_content = chunk.additional_kwargs.get('reasoning', '')
             if reasoning_content is None:
                 reasoning_content = ''
 

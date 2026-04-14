@@ -74,20 +74,6 @@ class ContextPromptBuilder:
         if context.history_sql:
             parts.append(f'<history-sql>{context.history_sql}</history-sql>')
 
-        # 应丢弃的过滤条件（语义仲裁：子集过滤与全量分布冲突时）
-        if context.slots_to_discard:
-            slot_to_field = {
-                "is_consolidated": "sfbb（并表口径）",
-                "register_status": "register_status（注册状态）",
-            }
-            discard_hints = []
-            for slot in context.slots_to_discard:
-                hint = slot_to_field.get(slot, slot)
-                discard_hints.append(hint)
-            parts.append(
-                f'<filter-disposal>【重要】生成 SQL 时不要使用以下过滤条件（因与当前问题意图冲突，会导致分布统计失真）：{", ".join(discard_hints)}</filter-disposal>'
-            )
-        
         if not parts:
             return None
         

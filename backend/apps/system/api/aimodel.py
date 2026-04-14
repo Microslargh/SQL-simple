@@ -42,8 +42,20 @@ async def check_llm(info: AiModelCreator, trans: Trans):
                 SQLBotLogUtil.info(chunk)
                 if chunk and isinstance(chunk, str):
                     yield json.dumps({"content": chunk}) + "\n"
-                if chunk and isinstance(chunk, dict) and chunk.content:
-                    yield json.dumps({"content": chunk.content}) + "\n"
+                elif chunk:
+                    text = ""
+                    content = getattr(chunk, "content", None)
+                    if isinstance(content, str) and content.strip():
+                        text = content.strip()
+                    else:
+                        additional = getattr(chunk, "additional_kwargs", None) or {}
+                        for k in ("reasoning_content", "reasoning", "text", "output_text"):
+                            v = additional.get(k)
+                            if isinstance(v, str) and v.strip():
+                                text = v.strip()
+                                break
+                    if text:
+                        yield json.dumps({"content": text}) + "\n"
         
         except Exception as e:
             SQLBotLogUtil.error(f"Error checking LLM: {e}")

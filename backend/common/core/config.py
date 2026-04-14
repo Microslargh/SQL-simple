@@ -159,6 +159,15 @@ class Settings(BaseSettings):
     GUESS_SCHEMA_INCLUDE_VALUE_HINTS: bool = Field(default=True, description="猜你想问 schema 是否注入深表字段值域示例")
     GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")
     GUESS_SQL_VALIDATE_ENABLED: bool = Field(default=False, description="是否启用猜你想问 SQL 预验证（会增加延迟）")
+    TABLE_SELECTOR_LLM_ENABLED: bool = Field(default=True, description="是否启用 SQL 前 LLM 选表节点")
+    TABLE_SELECTOR_LLM_TOPK: int = Field(default=1, description="LLM 选表返回数量（建议 1-3）")
+    TABLE_SELECTOR_LLM_STRICT: bool = Field(default=True, description="LLM 选表失败时是否禁止回退到默认表检索")
+    SQL_AUTOFIX_ENABLED: bool = Field(default=True, description="是否启用 SQL 语法校验与自动修复")
+    SQL_AUTOFIX_MAX_RETRIES: int = Field(default=1, description="SQL 自动修复最大重试次数")
+
+    # 历史行业规则开关（如 cqs/jq_zbval、并表/存续口径、特定字段槽位映射等）
+    # 面向全新数据库时建议关闭，避免旧业务规则干扰 SQL 生成。
+    LEGACY_DOMAIN_RULES_ENABLED: bool = Field(default=False, description="是否启用历史行业硬编码规则")
 
     # OAuth2 SSO 配置
     OAUTH2_ENABLED: bool = True  # 是否启用OAuth2单点登录（默认禁用，需要手动启用）

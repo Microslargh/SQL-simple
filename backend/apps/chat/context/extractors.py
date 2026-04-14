@@ -7,6 +7,7 @@ import sqlparse
 from sqlalchemy.orm import Session
 
 from apps.chat.models.chat_model import ChatLog, ChatRecord
+from common.core.config import settings
 from common.utils.utils import _async_log_util
 
 
@@ -382,6 +383,18 @@ class FilterSlotExtractor:
         "gjczqyname": "group_company",
     }
 
+    BASE_FIELD_TO_SLOT = {
+        "year": "year",
+        "month": "month",
+        "create_date": "create_date",
+    }
+
+    @classmethod
+    def _get_field_to_slot(cls) -> Dict[str, str]:
+        if getattr(settings, "LEGACY_DOMAIN_RULES_ENABLED", False):
+            return cls.FIELD_TO_SLOT
+        return cls.BASE_FIELD_TO_SLOT
+
     @classmethod
     def extract_slots(cls, history_sql: str) -> Dict[str, str]:
         """从 SQL 提取过滤条件槽位"""
@@ -404,16 +417,17 @@ class FilterSlotExtractor:
         for m in eq_pattern.finditer(sql):
             field, str_val, num_val = m.group(1), m.group(2), m.group(3)
             val = str_val if str_val is not None else (num_val or "")
-            slot_key = cls.FIELD_TO_SLOT.get(field.lower(), field.lower())
+            slot_key = cls._get_field_to_slot().get(field.lower(), field.lower())
             slots[slot_key] = val
 
         # sfbb IN ('1','2') 或 sfbb IN ('1', '2', '3') 等 → 并表口径（is_consolidated）
-        sfbb_in = re.search(
-            r'["\']?sfbb["\']?\s+IN\s*\([^)]+\)',
-            sql, re.IGNORECASE
-        )
-        if sfbb_in:
-            slots["is_consolidated"] = "1"
+        if getattr(settings, "LEGACY_DOMAIN_RULES_ENABLED", False):
+            sfbb_in = re.search(
+                r'["\']?sfbb["\']?\s+IN\s*\([^)]+\)',
+                sql, re.IGNORECASE
+            )
+            if sfbb_in:
+                slots["is_consolidated"] = "1"
 
         _async_log_util.info(f"[上下文提取] 从 SQL 提取槽位: {slots}")
         return slots

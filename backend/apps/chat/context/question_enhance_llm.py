@@ -259,6 +259,8 @@ def validate_and_correct_industry(content: str, current_question: str) -> str:
     """按“当前问句优先”纠正产业名称，避免把上一轮产业错误继承到本轮。"""
     if not content:
         return content
+    if not getattr(settings, "LEGACY_DOMAIN_RULES_ENABLED", False):
+        return content
 
     target_industry = _extract_canonical_industry(current_question or "")
     content_industry = _extract_canonical_industry(content)

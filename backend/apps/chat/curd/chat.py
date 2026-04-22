@@ -3,7 +3,8 @@ from typing import Any, List
 
 import orjson
 import sqlparse
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, select, update, insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from apps.chat.models.chat_model import Chat, ChatRecord, CreateChat, ChatInfo, RenameChat, ChatQuestion, ChatLog, \
     TypeEnum, OperationEnum, ChatRecordResult, ErrorQueryRecord, ChatExecutionTrace, \
@@ -476,18 +477,38 @@ def save_analysis_predict_record(session: SessionDep, base_record: ChatRecord, a
 
 def start_log(session: SessionDep, ai_modal_id: int, ai_modal_name: str, operate: OperationEnum, record_id: int,
               full_message: list[dict]) -> ChatLog:
-    log = ChatLog(type=TypeEnum.CHAT, operate=operate, pid=record_id, ai_modal_id=ai_modal_id, base_modal=ai_modal_name,
-                  messages=full_message, start_time=datetime.datetime.now())
-
-    result = ChatLog(**log.model_dump())
-
-    session.add(log)
-    session.flush()
-    session.refresh(log)
-    result.id = log.id
-    session.commit()
-
-    return result
+    now = datetime.datetime.now()
+    result = ChatLog(
+        id=None,
+        type=TypeEnum.CHAT,
+        operate=operate,
+        pid=record_id,
+        ai_modal_id=ai_modal_id,
+        base_modal=ai_modal_name,
+        messages=full_message,
+        start_time=now,
+    )
+    try:
+        stmt = (
+            insert(ChatLog)
+            .values(
+                type=TypeEnum.CHAT,
+                operate=operate,
+                pid=record_id,
+                ai_modal_id=ai_modal_id,
+                base_modal=ai_modal_name,
+                messages=full_message,
+                start_time=now,
+            )
+            .returning(ChatLog.id)
+        )
+        inserted_id = session.execute(stmt).scalar_one()
+        result.id = int(inserted_id) if inserted_id is not None else None
+        session.commit()
+        return result
+    except SQLAlchemyError:
+        session.rollback()
+        raise
 
 
 def end_log(session: SessionDep, log: ChatLog, full_message: list[dict], reasoning_content: str = None,
@@ -505,8 +526,12 @@ def end_log(session: SessionDep, log: ChatLog, full_message: list[dict], reasoni
         finish_time=log.finish_time,
         reasoning_content=log.reasoning_content
     )
-    session.execute(stmt)
-    session.commit()
+    try:
+        session.execute(stmt)
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        raise
 
     return log
 
@@ -532,7 +557,11 @@ def start_execution_trace(
         input_payload: Any = None,
         extra_data: Any = None,
 ) -> ChatExecutionTrace:
-    trace = ChatExecutionTrace(
+    now = datetime.datetime.now()
+    input_data = _normalize_trace_payload(input_payload)
+    extra = _normalize_trace_payload(extra_data)
+    result = ChatExecutionTrace(
+        id=None,
         record_id=record_id,
         chat_id=chat_id,
         create_by=create_by,
@@ -540,17 +569,36 @@ def start_execution_trace(
         node_key=node_key,
         node_name=node_name,
         status=ChatExecutionTraceStatus.RUNNING,
-        input_payload=_normalize_trace_payload(input_payload),
-        extra_data=_normalize_trace_payload(extra_data),
-        start_time=datetime.datetime.now(),
+        input_payload=input_data,
+        extra_data=extra,
+        start_time=now,
     )
-    result = ChatExecutionTrace(**trace.model_dump())
-    session.add(trace)
-    session.flush()
-    session.refresh(trace)
-    result.id = trace.id
-    session.commit()
-    return result
+    try:
+        # 显式排除 id，避免 GENERATED ALWAYS 列被带入非 DEFAULT 值
+        stmt = (
+            insert(ChatExecutionTrace)
+            .values(
+                record_id=record_id,
+                chat_id=chat_id,
+                create_by=create_by,
+                trace_group=trace_group,
+                node_key=node_key,
+                node_name=node_name,
+                status=ChatExecutionTraceStatus.RUNNING,
+                input_payload=input_data,
+                extra_data=extra,
+                start_time=now,
+            )
+            .returning(ChatExecutionTrace.id)
+        )
+        inserted_id = session.execute(stmt).scalar_one()
+        result.id = int(inserted_id) if inserted_id is not None else None
+        session.commit()
+        return result
+    except SQLAlchemyError:
+        # 关键：追踪写入失败必须 rollback，避免后续主流程触发 PendingRollbackError
+        session.rollback()
+        raise
 
 
 def end_execution_trace(
@@ -561,6 +609,8 @@ def end_execution_trace(
         error_message: str | None = None,
         extra_data: Any = None,
 ) -> ChatExecutionTrace:
+    if not trace or not trace.id:
+        return trace
     finish_time = datetime.datetime.now()
     duration_ms = None
     if trace.start_time:
@@ -578,8 +628,12 @@ def end_execution_trace(
         finish_time=finish_time,
         duration_ms=duration_ms
     )
-    session.execute(stmt)
-    session.commit()
+    try:
+        session.execute(stmt)
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        raise
     trace.status = status
     trace.output_payload = _normalize_trace_payload(output_payload)
     trace.error_message = error_message

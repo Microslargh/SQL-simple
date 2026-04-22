@@ -18,6 +18,7 @@ import sqlparse
 from langchain.chat_models.base import BaseChatModel
 from langchain_community.utilities import SQLDatabase
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, BaseMessageChunk
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import and_, select
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session
@@ -140,9 +141,8 @@ class LLMService:
         self.chunk_list = []
         self.trace_group = uuid4().hex
         self._pipeline_trace = None
-        # engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
-        # session_maker = sessionmaker(bind=engine)
-        # self.session = session_maker()
+        # 必须使用“每个 LLMService 实例独立 Session”，避免并发请求共享同一个 Session 导致事务互相污染。
+        self.session = session_maker()
         self.session.exec = self.session.exec if hasattr(self.session, "exec") else self.session.execute
         self.current_user = current_user
         self.current_assistant = current_assistant
@@ -218,6 +218,13 @@ class LLMService:
         config: LLMConfig = await get_default_config()
         instance = cls(*args, **kwargs, config=config)
         return instance
+
+    def _close_session_safely(self):
+        try:
+            if getattr(self, "session", None):
+                self.session.close()
+        except Exception:
+            pass
 
     def is_running(self, timeout=0.5):
         try:
@@ -1269,6 +1276,13 @@ class LLMService:
                 input_payload=input_payload,
                 extra_data=extra_data,
             )
+        except SQLAlchemyError as exc:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            _async_log_util.warning(f"[执行轨迹] start trace 数据库异常，已降级忽略 {node_key}: {exc}")
+            return None
         except Exception as exc:
             _async_log_util.debug(f"[执行轨迹] start trace 失败 {node_key}: {exc}")
             return None
@@ -1287,6 +1301,12 @@ class LLMService:
                 error_message=error_message,
                 extra_data=extra_data,
             )
+        except SQLAlchemyError as exc:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            _async_log_util.warning(f"[执行轨迹] end trace 数据库异常，已降级忽略 {getattr(trace, 'node_key', '')}: {exc}")
         except Exception as exc:
             _async_log_util.debug(f"[执行轨迹] end trace 失败 {getattr(trace, 'node_key', '')}: {exc}")
 
@@ -4283,6 +4303,7 @@ class LLMService:
                 }
             )
             self.finish()
+            self._close_session_safely()
 
     def run_recommend_questions_task_async(self):
         self.future = executor.submit(self.run_recommend_questions_task_cache)
@@ -4365,8 +4386,7 @@ class LLMService:
             self.save_error(message=error_msg)
             yield 'data:' + orjson.dumps({'content': error_msg, 'type': 'error'}).decode() + '\n\n'
         finally:
-            # end
-            pass
+            self._close_session_safely()
 
     def validate_history_ds(self):
         _ds = self.ds

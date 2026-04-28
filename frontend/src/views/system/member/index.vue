@@ -237,7 +237,7 @@ const handleCurrentChange = (val: number) => {
         </el-button>
       </div>
     </div>
-    <div class="table-content" :class="multipleSelectionAll.length && 'show-pagination_height'">
+    <div class="table-content" :class="multipleSelectionAll.length ? 'show-pagination_height' : ''">
       <div class="preview-or-schema">
         <el-table
           ref="multipleTableRef"
@@ -283,7 +283,7 @@ const handleCurrentChange = (val: number) => {
                 >
                   <el-icon
                     class="action-btn"
-                    :class="+userStore.getUid !== 1 && scope.row.weight === 1 && 'not-allow'"
+                    :class="+userStore.getUid !== 1 && scope.row.weight === 1 ? 'not-allow' : ''"
                     size="16"
                     @click="deleteHandler(scope.row)"
                   >
@@ -354,7 +354,7 @@ const handleCurrentChange = (val: number) => {
     <el-input
       v-model="workspaceForm.name"
       clearable
-      :class="workspaceForm.name && 'value-input'"
+      :class="workspaceForm.name ? 'value-input' : ''"
       :placeholder="$t('workspace.id_account_to_add')"
     >
       <template #append>

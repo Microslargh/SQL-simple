@@ -359,7 +359,7 @@ const handleCurrentChange = (val: number) => {
             v-for="ele in tableListWithSearch"
             :key="ele.name"
             class="model"
-            :class="currentTable.name === ele.name && 'isActive'"
+            :class="currentTable.name === ele.name ? 'isActive' : ''"
             :title="ele.name"
             @click="clickTable(ele)"
           >
@@ -446,7 +446,7 @@ const handleCurrentChange = (val: number) => {
           </el-input>
         </div>
       </div>
-      <div class="table-content" :class="multipleSelectionAll.length && 'show-pagination_height'">
+      <div class="table-content" :class="multipleSelectionAll.length ? 'show-pagination_height' : ''">
         <div class="preview-or-schema">
           <el-table
             ref="multipleTableRef"
@@ -498,7 +498,7 @@ const handleCurrentChange = (val: number) => {
                         v-for="ele in userTypeList"
                         :key="ele.name"
                         class="popover-item"
-                        :class="ele.name === scope.row.user_source && 'isActive'"
+                        :class="ele.name === scope.row.user_source ? 'isActive' : ''"
                         @click="handleUserTypeChange(ele.value, scope.row)"
                       >
                         <div class="model-name">{{ ele.name }}</div>

@@ -40,6 +40,15 @@ class ContextStateManager:
         """
         if not history_logs or len(history_logs) == 0:
             return current_question
+
+        # 语义层门控：仅“追问/指代”才允许进入问题增强链路。
+        # 避免把新的独立问句误判为追问并继承上一轮限制条件。
+        q = (current_question or "").strip()
+        reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
+        has_reference = any(word in q for word in reference_words)
+        if not (has_reference or is_any_follow_up(q)):
+            _async_log_util.info(f"[问题增强] 当前问句非追问/非指代，跳过历史增强: {q[:60]}")
+            return current_question
         
         # 优先从 ChatRecord 取当轮用户问题（log.messages 里第一个 human 可能是 <context> 上下文块，非真实问句）
         def _get_user_question_for_log(log: ChatLog) -> Optional[str]:
@@ -83,7 +92,6 @@ class ContextStateManager:
             history_turns.append({"user": user_text, "assistant": assistant_text})
 
         # 已含明确实体（省/市+指标/明细）时不再调 LLM，避免“过度增强”注入用户未提及的过滤条件（如存续、集团、压减）
-        q = (current_question or "").strip()
         if len(q) >= 8 and ("省" in q or "市" in q or "区" in q) and ("法人" in q or "户数" in q or "明细" in q or "详情" in q):
             _async_log_util.info(f"[问题增强] 当前问句已含明确地区与指标，跳过 LLM 与规则，直接返回: {q[:60]}")
             return current_question

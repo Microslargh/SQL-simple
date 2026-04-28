@@ -259,6 +259,16 @@ class AiModelQuestion(BaseModel):
         return get_sql_template()['straight'].format(engine=self.engine, schema=self.db_schema, question=self.question,
                                                    lang=self.lang, terminologies=self.terminologies,
                                                    data_training=self.data_training, custom_prompt=self.custom_prompt)
+
+    def sql_rewrite_question(self):
+        return get_sql_template()['rewrite'].format(
+            engine=self.engine,
+            schema=self.db_schema,
+            question=self.question,
+            lang=self.lang,
+            terminologies=self.terminologies,
+            custom_prompt=self.custom_prompt
+        )
     @staticmethod
     def double_check_question(template_id, template_question, sql_template, sql_info, user_sql_info):
         return get_sql_template()['double_check'].format(

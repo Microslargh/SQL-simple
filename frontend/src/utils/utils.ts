@@ -1,9 +1,5 @@
 import dayjs from 'dayjs'
 import { useCache } from '@/utils/useCache'
-// @ts-ignore
-import colorFunctions from 'less/lib/less/functions/color.js'
-// @ts-ignore
-import colorTree from 'less/lib/less/tree/color.js'
 
 const { wsCache } = useCache()
 const getCheckDate = (timestamp: any) => {
@@ -155,6 +151,27 @@ export function colorStringToHex(colorStr: any) {
   return a !== undefined ? rgbaToHex(r, g, b, a) : rgbToHex(r, g, b)
 }
 
+function hexToRgb(hex: string) {
+  const normalized = (hex || '').replace('#', '').slice(0, 6)
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return null
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16),
+  }
+}
+
+function mixRgb(color1: string, color2: string, weight: number) {
+  const c1 = hexToRgb(color1)
+  const c2 = hexToRgb(color2)
+  if (!c1 || !c2) return color2
+  const w = Math.max(0, Math.min(100, weight)) / 100
+  const r = Math.round(c1.r * w + c2.r * (1 - w))
+  const g = Math.round(c1.g * w + c2.g * (1 - w))
+  const b = Math.round(c1.b * w + c2.b * (1 - w))
+  return `rgb(${r}, ${g}, ${b})`
+}
+
 export const setCurrentColor = (color: any, element: HTMLElement = document.documentElement) => {
   const currentColor = colorStringToHex(color) as any
   if (!currentColor) {
@@ -162,47 +179,17 @@ export const setCurrentColor = (color: any, element: HTMLElement = document.docu
   }
   element.style.setProperty('--ed-color-primary', currentColor)
   element.style.setProperty('--van-blue', currentColor)
-  element.style.setProperty(
-    '--ed-color-primary-light-5',
-    colorFunctions
-      .mix(new colorTree('ffffff'), new colorTree(currentColor.substr(1)), { value: 40 })
-      .toRGB()
-  )
-  element.style.setProperty(
-    '--ed-color-primary-light-3',
-    colorFunctions
-      .mix(new colorTree('ffffff'), new colorTree(currentColor.substr(1)), { value: 15 })
-      .toRGB()
-  )
+  element.style.setProperty('--ed-color-primary-light-5', mixRgb('#ffffff', currentColor, 40))
+  element.style.setProperty('--ed-color-primary-light-3', mixRgb('#ffffff', currentColor, 15))
 
-  element.style.setProperty(
-    '--ed-color-primary-60',
-    colorFunctions
-      .mix(new colorTree('ffffff'), new colorTree(currentColor.substr(1)), { value: 60 })
-      .toRGB()
-  )
+  element.style.setProperty('--ed-color-primary-60', mixRgb('#ffffff', currentColor, 60))
 
-  element.style.setProperty(
-    '--ed-color-primary-80',
-    colorFunctions
-      .mix(new colorTree('ffffff'), new colorTree(currentColor.substr(1)), { value: 80 })
-      .toRGB()
-  )
+  element.style.setProperty('--ed-color-primary-80', mixRgb('#ffffff', currentColor, 80))
 
-  element.style.setProperty(
-    '--ed-color-primary-15-d',
-    colorFunctions
-      .mix(new colorTree('000000'), new colorTree(currentColor.substr(1)), { value: 15 })
-      .toRGB()
-  )
+  element.style.setProperty('--ed-color-primary-15-d', mixRgb('#000000', currentColor, 15))
   element.style.setProperty('--ed-color-primary-1a', `${currentColor}1a`)
   element.style.setProperty('--ed-color-primary-14', `${currentColor}14`)
   element.style.setProperty('--ed-color-primary-33', `${currentColor}33`)
   element.style.setProperty('--ed-color-primary-99', `${currentColor}99`)
-  element.style.setProperty(
-    '--ed-color-primary-dark-2',
-    colorFunctions
-      .mix(new colorTree('000000'), new colorTree(currentColor.substr(1)), { value: 15 })
-      .toRGB()
-  )
+  element.style.setProperty('--ed-color-primary-dark-2', mixRgb('#000000', currentColor, 15))
 }

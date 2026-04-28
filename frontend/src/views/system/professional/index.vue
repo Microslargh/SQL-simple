@@ -366,7 +366,7 @@ const deleteHandlerItem = (idx: number) => {
     <div
       v-if="!searchLoading"
       class="table-content"
-      :class="multipleSelectionAll?.length && 'show-pagination_height'"
+      :class="multipleSelectionAll?.length ? 'show-pagination_height' : ''"
     >
       <div class="preview-or-schema">
         <el-table
@@ -534,7 +534,7 @@ const deleteHandlerItem = (idx: number) => {
       </el-form-item>
       <el-form-item
         class="is-required"
-        :class="!pageForm.specific_ds && 'no-error'"
+        :class="!pageForm.specific_ds ? 'no-error' : ''"
         prop="datasource_ids"
         :label="t('training.effective_data_sources')"
       >

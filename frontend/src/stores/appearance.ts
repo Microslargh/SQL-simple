@@ -8,7 +8,6 @@ import { setTitle, setCurrentColor } from '@/utils/utils'
 const basePath = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 const baseUrl = basePath + '/system/appearance/picture/'
 import { isBtnShow } from '@/utils/utils'
-import type { LinkHTMLAttributes } from 'vue'
 interface AppearanceState {
   themeColor?: string
   customColor?: string
@@ -307,12 +306,12 @@ export const useAppearanceStore = defineStore('appearanceStore', {
 })
 
 const setLinkIcon = (linkWeb?: string) => {
-  const link = document.querySelector('link[rel="icon"]') as LinkHTMLAttributes
+  const link = document.querySelector('link[rel="icon"]') as HTMLLinkElement | null
   if (link) {
     if (linkWeb) {
-      link['href'] = baseUrl + linkWeb
+      link.href = baseUrl + linkWeb
     } else {
-      link['href'] = '/LOGO-fold.svg'
+      link.href = '/LOGO-fold.svg'
     }
   }
 }

@@ -99,6 +99,7 @@ const stepOrder = [
   'terminology-retrieval',
   'training-retrieval',
   'table-retrieval',
+  'question-rewrite',
   'sql-generation',
   'sql-execution',
   'chart-generation',

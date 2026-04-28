@@ -376,21 +376,21 @@ const typeChange = (val: any) => {
     <div class="tool-left">
       <div v-if="false" class="btn-select">
         <el-button
-          :class="[currentType === 'GENERATE_SQL' && 'is-active']"
+          :class="[currentType === 'GENERATE_SQL' ? 'is-active' : '']"
           text
           @click="typeChange('GENERATE_SQL')"
         >
           {{ $t('prompt.ask_sql') }}
         </el-button>
         <el-button
-          :class="[currentType === 'ANALYSIS' && 'is-active']"
+          :class="[currentType === 'ANALYSIS' ? 'is-active' : '']"
           text
           @click="typeChange('ANALYSIS')"
         >
           {{ $t('prompt.data_analysis') }}
         </el-button>
         <el-button
-          :class="[currentType === 'PREDICT_DATA' && 'is-active']"
+          :class="[currentType === 'PREDICT_DATA' ? 'is-active' : '']"
           text
           @click="typeChange('PREDICT_DATA')"
         >
@@ -437,7 +437,7 @@ const typeChange = (val: any) => {
     <div
       v-if="!searchLoading"
       class="table-content"
-      :class="multipleSelectionAll?.length && 'show-pagination_height'"
+      :class="multipleSelectionAll?.length ? 'show-pagination_height' : ''"
     >
       <div class="preview-or-schema">
         <el-table
@@ -608,7 +608,7 @@ const typeChange = (val: any) => {
       <el-form-item
       v-if="false"
         class="is-required"
-        :class="!pageForm.specific_ds && 'no-error'"
+        :class="!pageForm.specific_ds ? 'no-error' : ''"
         prop="datasource_ids"
         :label="t('training.effective_data_sources')"
       >

@@ -302,14 +302,14 @@ const copyCode = (row: any, key: any = 'app_secret') => {
     <div class="tool-left">
       <div class="btn-select">
         <el-button
-          :class="[btnSelect === 'd' && 'is-active']"
+          :class="[btnSelect === 'd' ? 'is-active' : '']"
           text
           @click="emits('btnSelectChange', 'd')"
         >
           {{ t('embedded.embedded_assistant') }}
         </el-button>
         <el-button
-          :class="[btnSelect === 'q' && 'is-active']"
+          :class="[btnSelect === 'q' ? 'is-active' : '']"
           text
           @click="emits('btnSelectChange', 'q')"
         >
@@ -342,7 +342,7 @@ const copyCode = (row: any, key: any = 'app_secret') => {
     <div
       v-if="!searchLoading"
       class="table-content"
-      :class="multipleSelectionAll.length && 'show-pagination_height'"
+      :class="multipleSelectionAll.length ? 'show-pagination_height' : ''"
     >
       <template v-if="!oldKeywords && !fieldList.length">
         <EmptyBackground

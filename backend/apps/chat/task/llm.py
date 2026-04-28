@@ -114,6 +114,7 @@ class LLMService:
     llm: BaseChatModel
     sql_message: List[Union[BaseMessage, dict[str, Any]]] = []
     straight_messages: List[Union[BaseMessage, dict[str, Any]]] = []
+    rewrite_messages: List[Union[BaseMessage, dict[str, Any]]] = []
     chart_message: List[Union[BaseMessage, dict[str, Any]]] = []
 
     session: Session = db_session
@@ -344,6 +345,25 @@ class LLMService:
                         "matched": {"type": "boolean"}
                     },
                     "required": ["matched"],
+                    "additionalProperties": False
+                }
+            }
+        }
+
+    @staticmethod
+    def _rewrite_response_format() -> dict:
+        """问题重写结构化输出：统一返回 question_rewrite 字段。"""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sqlbot_rewrite_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "question_rewrite": {"type": "string"}
+                    },
+                    "required": ["question_rewrite"],
                     "additionalProperties": False
                 }
             }
@@ -1219,6 +1239,20 @@ class LLMService:
                     _async_log_util.info(f"[多轮对话-快速模板] 当前问题无需上下文信息")
         else:
             _async_log_util.info(f"[多轮对话-快速模板] 无历史SQL日志，这是第一轮对话")
+
+    def init_rewrite_messages(self):
+        """初始化问题重写消息列表，复用上下文缓存避免重复分析。"""
+        self.rewrite_messages = []
+        self.rewrite_messages.append(SystemMessage(content=self.chat_question.sql_rewrite_question()))
+
+        if len(self.generate_sql_logs) > 0:
+            cached = getattr(self, "_context_prompt_cache", None)
+            if cached:
+                context_message = f"<context>\n{cached}\n</context>"
+                self.rewrite_messages.append(HumanMessage(content=context_message))
+                _async_log_util.info(f"[多轮对话-重写] 复用已缓存上下文，长度: {len(cached)} 字符")
+            elif cached == "":
+                _async_log_util.info("[多轮对话-重写] 复用：当前问题无需上下文")
 
 
     def init_record(self) -> ChatRecord:
@@ -2185,6 +2219,80 @@ class LLMService:
                 "reasoning_content": full_thinking_text,
             }
         )
+
+    def generate_rewrite_question(self) -> tuple[str, str]:
+        """执行独立问题重写节点，返回 (重写后问题, 原始模型输出)。"""
+        rewrite_messages = list(self.rewrite_messages)
+        rewrite_messages.append(HumanMessage(
+            self.chat_question.sql_user_question(current_time=self._get_effective_current_time())
+        ))
+        trace = self._trace_start(
+            node_key="question_rewrite",
+            node_name="问题重写",
+            input_payload={
+                "messages": self._serialize_messages_for_trace(rewrite_messages),
+            }
+        )
+
+        token_usage = {}
+        res = process_stream(
+            self._stream_with_response_format(
+                rewrite_messages,
+                self._rewrite_response_format(),
+                "问题重写结构化输出"
+            ),
+            token_usage
+        )
+        full_text = ""
+        full_reasoning_text = ""
+        for chunk in res:
+            if chunk.get("content"):
+                full_text += chunk.get("content")
+            if chunk.get("reasoning_content"):
+                full_reasoning_text += chunk.get("reasoning_content")
+
+        rewritten_question = ""
+        try:
+            rewrite_json = extract_nested_json(full_text) or full_text
+            rewrite_data = orjson.loads(rewrite_json)
+            if isinstance(rewrite_data, dict) and isinstance(rewrite_data.get("question_rewrite"), str):
+                rewritten_question = rewrite_data.get("question_rewrite").strip()
+        except Exception:
+            pass
+
+        if not rewritten_question:
+            # 回退解析：兼容网关偶发未按 json_schema 输出的场景
+            match = re.search(r'"question_rewrite"\s*:\s*"((?:[^"\\]|\\.)*)"', full_text, re.DOTALL)
+            if match:
+                try:
+                    rewritten_question = orjson.loads(f'"{match.group(1)}"').strip()
+                except Exception:
+                    rewritten_question = match.group(1).strip()
+
+        if not rewritten_question:
+            self._trace_end(
+                trace,
+                status=ChatExecutionTraceStatus.ERROR,
+                output_payload={
+                    "response_text": full_text,
+                    "reasoning_content": full_reasoning_text,
+                    "token_usage": token_usage,
+                },
+                error_message="cannot parse question_rewrite"
+            )
+            raise SingleMessageError("Rewrite question failed: cannot parse question_rewrite")
+
+        self.rewrite_messages = rewrite_messages + [AIMessage(content=full_text)]
+        self._trace_end(
+            trace,
+            output_payload={
+                "rewritten_question": rewritten_question,
+                "response_text": full_text,
+                "reasoning_content": full_reasoning_text,
+                "token_usage": token_usage,
+            }
+        )
+        return rewritten_question, full_text
 
     def generate_sql(self):
         # append current question（法人户数且未指定时间时 current_time 取自产权表压减=是的最新创建时间）
@@ -3579,12 +3687,14 @@ class LLMService:
 
             self.init_messages()
             self.init_straight_messages()
+            self.init_rewrite_messages()
             self._trace_step(
                 node_key="prompt_build",
                 node_name="Prompt构建",
                 output_payload={
                     "sql_message_count": len(self.sql_message),
                     "straight_message_count": len(self.straight_messages),
+                    "rewrite_message_count": len(self.rewrite_messages),
                     "chart_message_count": len(self.chart_message),
                     "enhanced_question": self.chat_question.question,
                     "context_prompt_cached": bool(getattr(self, "_context_prompt_cache", None)),
@@ -3743,10 +3853,13 @@ class LLMService:
             # 否则 init_messages 在前面已用空 schema 格式化，导致 {schema} 未注入到 SQL 生成节点
             self.init_messages()
             self.init_straight_messages()
+            self.init_rewrite_messages()
             _async_log_util.info(
                 f"[Prompt构建-重建] schema_retrieval后重建消息完成 | "
                 f"schema_length={len(self.chat_question.db_schema or '')} | "
-                f"sql_message_count={len(self.sql_message)} | straight_message_count={len(self.straight_messages)}"
+                f"sql_message_count={len(self.sql_message)} | "
+                f"straight_message_count={len(self.straight_messages)} | "
+                f"rewrite_message_count={len(self.rewrite_messages)}"
             )
 
             # check connection
@@ -3866,6 +3979,73 @@ class LLMService:
                     # 快速模板失败，不保存快速模板的日志，让正常SQL生成流程来保存日志
             
             if not status:
+                # 未命中快速模板时，再执行问题重写，避免重写内容污染模板匹配输入
+                if in_chat:
+                    yield 'data:' + orjson.dumps({
+                        'type': 'step-start',
+                        'step': 'question-rewrite',
+                        'step_name': '问题重写',
+                        'description': '未命中快速模板，正在重写问题语义...'
+                    }).decode() + '\n\n'
+
+                original_question_before_rewrite = self.chat_question.question or ""
+                rewritten_question = original_question_before_rewrite
+                rewrite_raw_output = ""
+                rewrite_changed = False
+                rewrite_fallback_reason = ""
+                try:
+                    rewritten_question, rewrite_raw_output = self.generate_rewrite_question()
+                    if rewritten_question and rewritten_question.strip():
+                        rewritten_question = rewritten_question.strip()
+                        if rewritten_question != original_question_before_rewrite:
+                            self.chat_question.question = rewritten_question
+                            # 重写完成后不再重复执行“历史追问增强”，避免重写结果被二次改写
+                            self._question_enhanced = True
+                            self.init_messages()
+                            self.init_straight_messages()
+                            self.init_rewrite_messages()
+                            rewrite_changed = True
+                            _async_log_util.info(
+                                f"[问题重写] 已应用重写结果 | 原问题: {original_question_before_rewrite[:80]} | "
+                                f"重写后: {rewritten_question[:120]}"
+                            )
+                    else:
+                        rewrite_fallback_reason = "empty_rewrite_result"
+                except Exception as rewrite_error:
+                    rewrite_fallback_reason = str(rewrite_error)
+                    _async_log_util.warning(
+                        f"[问题重写] 重写失败，回退原问题继续执行SQL生成 | error={rewrite_fallback_reason}"
+                    )
+
+                self._trace_step(
+                    node_key="question_rewrite_summary",
+                    node_name="问题重写汇总",
+                    input_payload={
+                        "question_before": original_question_before_rewrite,
+                    },
+                    output_payload={
+                        "question_after": self.chat_question.question,
+                        "question_changed": rewrite_changed,
+                        "rewrite_status": "fallback" if rewrite_fallback_reason else "success",
+                        "fallback_reason": rewrite_fallback_reason,
+                        "rewrite_output_preview": (rewrite_raw_output or "")[:500],
+                    },
+                    # 回退属于可预期降级，不应标记为主流程错误
+                    status=ChatExecutionTraceStatus.SUCCESS,
+                )
+
+                if in_chat:
+                    yield 'data:' + orjson.dumps({
+                        'type': 'step-complete',
+                        'step': 'question-rewrite',
+                        'step_name': '问题重写',
+                        'description': '问题重写已完成' if not rewrite_fallback_reason else '重写失败，已回退原问题',
+                        'result': {
+                            'rewritten_question': self.chat_question.question,
+                            'changed': rewrite_changed
+                        }
+                    }).decode() + '\n\n'
+
                 _async_log_util.info(f"[SQL生成] 使用正常SQL生成流程 - 用户问题: {self.chat_question.question[:100]}")
                 # generate sql
                 sql_res = self.generate_sql()

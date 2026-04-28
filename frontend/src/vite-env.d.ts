@@ -20,7 +20,7 @@ declare module 'less/lib/less/tree/color.js' {
 }
 
 // LicenseGenerator 全局类型声明
-/*declare global {
+declare global {
   interface LicenseGenerator {
     generate(): string
     sqlbotEncrypt(data: string): string
@@ -30,6 +30,6 @@ declare module 'less/lib/less/tree/color.js' {
   }
 
   const LicenseGenerator: LicenseGenerator
-}*/
+}
 
 export {}

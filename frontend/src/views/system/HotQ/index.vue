@@ -762,7 +762,7 @@ const typeChange = (val: any) => {
 
         <el-button
 
-          :class="[currentType === 'GENERATE_SQL' && 'is-active']"
+          :class="[currentType === 'GENERATE_SQL' ? 'is-active' : '']"
 
           text
 
@@ -776,7 +776,7 @@ const typeChange = (val: any) => {
 
         <el-button
 
-          :class="[currentType === 'ANALYSIS' && 'is-active']"
+          :class="[currentType === 'ANALYSIS' ? 'is-active' : '']"
 
           text
 
@@ -790,7 +790,7 @@ const typeChange = (val: any) => {
 
         <el-button
 
-          :class="[currentType === 'PREDICT_DATA' && 'is-active']"
+          :class="[currentType === 'PREDICT_DATA' ? 'is-active' : '']"
 
           text
 
@@ -884,7 +884,7 @@ const typeChange = (val: any) => {
 
       class="table-content"
 
-      :class="multipleSelectionAll?.length && 'show-pagination_height'"
+      :class="multipleSelectionAll?.length ? 'show-pagination_height' : ''"
 
     >
 
@@ -1254,7 +1254,7 @@ const typeChange = (val: any) => {
 
         class="is-required"
 
-        :class="!pageForm.specific_ds && 'no-error'"
+        :class="!pageForm.specific_ds ? 'no-error' : ''"
 
         prop="datasource_ids"
 

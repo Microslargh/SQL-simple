@@ -79,6 +79,14 @@
           <span class="result-label">引擎类型：</span>
           <span class="result-value">{{ result.engine_type }}</span>
         </div>
+        <div v-if="result.rewritten_question" class="result-item">
+          <span class="result-label">重写问题：</span>
+          <span class="result-value">{{ result.rewritten_question }}</span>
+        </div>
+        <div v-if="result.changed !== undefined" class="result-item">
+          <span class="result-label">是否改写：</span>
+          <span class="result-value">{{ result.changed ? '是' : '否' }}</span>
+        </div>
       </div>
 
     </div>

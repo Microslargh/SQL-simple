@@ -141,7 +141,7 @@ class ChatExecutionTraceStatus:
 
 class ChatExecutionTrace(SQLModel, table=True):
     __tablename__ = "chat_execution_trace"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     record_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联的 chat_record.id")
     chat_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联的 chat.id")
     create_by: int = Field(sa_column=Column(BigInteger, nullable=True), description="触发该链路的用户")

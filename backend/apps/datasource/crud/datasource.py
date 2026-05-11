@@ -239,6 +239,8 @@ def sync_table(session: SessionDep, ds: CoreDatasource, tables: List[CoreTable])
             id_list.append(record.id)
 
             record.table_comment = item.table_comment
+            if not record.custom_comment:
+                record.custom_comment = item.table_comment
             session.add(record)
             session.commit()
         else:
@@ -281,6 +283,8 @@ def sync_fields(session: SessionDep, ds: CoreDatasource, table: CoreTable, field
             record.field_comment = item.fieldComment
             record.field_index = index
             record.field_type = item.fieldType
+            if not record.custom_comment:
+                record.custom_comment = item.fieldComment
             session.add(record)
             session.commit()
         else:

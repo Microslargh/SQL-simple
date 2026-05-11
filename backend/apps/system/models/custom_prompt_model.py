@@ -15,7 +15,7 @@ class CustomPromptTypeEnum(str, Enum):
 
 class CustomPrompt(SQLModel, table=True):
     __tablename__ = "custom_prompt"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     oid: Optional[int] = Field(sa_column=Column(BigInteger, nullable=True))
     type: Optional[str] = Field(max_length=20, nullable=True)  # GENERATE_SQL, ANALYSIS, PREDICT_DATA
     create_time: Optional[datetime] = Field(sa_column=Column(DateTime(timezone=False), nullable=True))

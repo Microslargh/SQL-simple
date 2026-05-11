@@ -12,7 +12,7 @@ from sqlmodel import SQLModel, Field
 
 class DataTraining(SQLModel, table=True):
     __tablename__ = "data_training"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     oid: Optional[int] = Field(sa_column=Column(BigInteger, nullable=True, default=1))
     datasource: Optional[int] = Field(sa_column=Column(BigInteger, nullable=True))
     create_time: Optional[datetime] = Field(sa_column=Column(DateTime(timezone=False), nullable=True))

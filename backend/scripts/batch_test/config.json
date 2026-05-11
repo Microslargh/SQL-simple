@@ -1,0 +1,11 @@
+{
+  "api_base_url": "http://10.125.33.145:3100/api/v1",
+  "user_token": "eyJhbGciOi...",
+  "datasource_id": 12,
+  "questions_file": "questions.xlsx",
+  "output_file": "test_report.xlsx",
+  "requests_per_minute": 5,
+  "max_concurrent": 5,
+  "timeout_seconds": 300,
+  "log_file": "batch_test.log"
+}

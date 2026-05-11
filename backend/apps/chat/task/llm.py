@@ -78,7 +78,6 @@ dynamic_ds_types = [1, 3]
 dynamic_subsql_prefix = 'select * from sqlbot_dynamic_temp_table_'
 
 session_maker = sessionmaker(bind=engine)
-db_session = session_maker()
 
 
 def _parse_table_names_from_sql(sql: str) -> List[str]:
@@ -117,7 +116,7 @@ class LLMService:
     rewrite_messages: List[Union[BaseMessage, dict[str, Any]]] = []
     chart_message: List[Union[BaseMessage, dict[str, Any]]] = []
 
-    session: Session = db_session
+    session: Session
     current_user: CurrentUser
     current_assistant: "CurrentAssistant | None" = None
     out_ds_instance: Optional[AssistantOutDs] = None
@@ -4424,6 +4423,11 @@ class LLMService:
                 yield json_result
 
         except Exception as e:
+            # 关键：异常后先恢复 Session，避免后续 finally 块中的 DB 操作触发 PendingRollbackError
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
             _async_log_util.exception("LLM task failed")
             pipeline_status = ChatExecutionTraceStatus.ERROR
             error_msg: str
@@ -4558,6 +4562,10 @@ class LLMService:
 
             self.finish()
         except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
             error_msg: str
             if isinstance(e, SingleMessageError):
                 error_msg = str(e)

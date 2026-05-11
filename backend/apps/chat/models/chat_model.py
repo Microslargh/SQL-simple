@@ -51,7 +51,7 @@ class ChatFinishStep(Enum):
 
 class ChatLog(SQLModel, table=True):
     __tablename__ = "chat_log"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     type: TypeEnum = Field(
         sa_column=Column(SQLAlchemyEnum(TypeEnum, native_enum=False, values_callable=enum_values, length=3)))
     operate: OperationEnum = Field(
@@ -68,7 +68,7 @@ class ChatLog(SQLModel, table=True):
 
 class Chat(SQLModel, table=True):
     __tablename__ = "chat"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     oid: Optional[int] = Field(sa_column=Column(BigInteger, nullable=True, default=1))
     create_time: datetime = Field(sa_column=Column(DateTime(timezone=False), nullable=True))
     create_by: int = Field(sa_column=Column(BigInteger, nullable=True))
@@ -82,7 +82,7 @@ class Chat(SQLModel, table=True):
 
 class ChatRecord(SQLModel, table=True):
     __tablename__ = "chat_record"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     chat_id: int = Field(sa_column=Column(BigInteger, nullable=False))
     ai_modal_id: Optional[int] = Field(sa_column=Column(BigInteger))
     first_chat: bool = Field(sa_column=Column(Boolean, nullable=True, default=False))
@@ -120,7 +120,7 @@ class ErrorQueryFeedbackReason:
 class ErrorQueryRecord(SQLModel, table=True):
     """反馈空间：用户点踩后写入，供运维在系统管理中查看与标记处理状态。"""
     __tablename__ = "error_query_record"
-    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=True), primary_key=True))
+    id: Optional[int] = Field(sa_column=Column(BigInteger, Identity(always=False), primary_key=True))
     record_id: int = Field(sa_column=Column(BigInteger, nullable=False), description="关联的 chat_record.id")
     chat_id: int = Field(sa_column=Column(BigInteger, nullable=False))
     question: str = Field(sa_column=Column(Text, nullable=True), description="用户提出的问题")

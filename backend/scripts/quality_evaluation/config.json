@@ -1,0 +1,27 @@
+{
+  "llm": {
+    "provider": "openai-compatible",
+    "api_key": "",
+    "api_base": "http://localhost:8080/v1",
+    "api_version": null,
+    "model": "gpt-4o-mini",
+    "temperature": 0.2,
+    "max_tokens": 1024,
+    "timeout": 60
+  },
+  "scoring": {
+    "question_rewrite_weight": 0.4,
+    "sql_generation_weight": 0.6,
+    "enable_question_rewrite": true,
+    "enable_sql_generation": true
+  },
+  "rate_limit": {
+    "requests_per_minute": 30,
+    "max_concurrent": 5
+  },
+  "output": {
+    "input_file": "../batch_test/test_report.xlsx",
+    "output_file": "evaluation_report.xlsx",
+    "progress_file": ".evaluation_progress.json"
+  }
+}

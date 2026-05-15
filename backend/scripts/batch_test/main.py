@@ -91,6 +91,13 @@ class BatchTestRunner:
                 if record_id:
                     record_data = await self.client.get_chat_record(chat_id, record_id)
                     trace_collector.merge_with_record(record_data)
+                    
+                    # 获取执行轨迹（获取问题改写、术语、训练数据等详细信息）
+                    try:
+                        execution_trace = await self.client.get_execution_trace(record_id)
+                        trace_collector.parse_execution_trace(execution_trace)
+                    except Exception as e:
+                        logger.warning(f"Failed to get execution trace: {e}")
             except Exception as e:
                 logger.warning(f"Failed to get chat record: {e}")
             

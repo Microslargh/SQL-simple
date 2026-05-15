@@ -35,7 +35,7 @@ class ExecutionTrace:
             # 新增字段：问题改写模块
             "question_rewrite_input": "",
             "question_rewrite_output": "",
-            # 新增字段：SQL生成提示词
+            # 新增字段：SQL生成提示词和上下文
             "sql_gen_prompt": "",
             "sql_gen_terminology": "",
             "sql_gen_training_data": ""
@@ -48,19 +48,15 @@ class ExecutionTrace:
         for event in events:
             event_type = event.get("type")
 
-            # 提取对话ID
             if event_type == "id":
                 self.trace["record_id"] = event.get("id")
 
-            # 提取数据源信息
             elif event_type == "datasource":
                 self.trace["actual_ds_id"] = event.get("id")
 
-            # 提取SQL
             elif event_type == "sql":
                 self.trace["sql_generated"] = event.get("content", "")
 
-            # 提取图表配置
             elif event_type == "chart":
                 try:
                     chart_config = json.loads(event.get("content", "{}"))
@@ -68,39 +64,21 @@ class ExecutionTrace:
                 except json.JSONDecodeError:
                     pass
 
-            # 提取分析结果
             elif event_type == "analysis-result":
                 content = event.get("content", "")
                 self.trace["analysis_text"] += content
 
-            # 提取分析完成事件
             elif event_type == "analysis-replace":
                 self.trace["analysis_text"] = event.get("content", "")
 
-            # 提取步骤耗时
             elif event_type == "step-complete":
                 step_name = event.get("step")
                 duration_ms = event.get("duration_ms", 0)
                 self._update_step_duration(step_name, duration_ms)
 
-                # 提取步骤详情（问题改写和SQL生成的输入输出）
-                step_data = event.get("data", {})
-                if step_name == "question-rewrite" or step_name == "question-enhancement":
-                    self.trace["question_rewrite_input"] = step_data.get("input", "")
-                    self.trace["question_rewrite_output"] = step_data.get("output", "")
-                    self.trace["question_rewrite_input"] = self.trace["question_rewrite_input"] or step_data.get("question", "")
-                    self.trace["question_rewrite_output"] = self.trace["question_rewrite_output"] or step_data.get("enhanced_question", "")
-                
-                elif step_name == "sql-generation":
-                    self.trace["sql_gen_prompt"] = step_data.get("prompt", "")
-                    self.trace["sql_gen_terminology"] = step_data.get("terminology", "")
-                    self.trace["sql_gen_training_data"] = step_data.get("training_data", "")
-
-            # 提取总耗时
             elif event_type == "total_duration":
                 self.trace["total_duration_ms"] = event.get("duration_ms", 0)
 
-            # 提取错误信息 - 改进：检查是否有error事件且有有效错误内容
             elif event_type == "error":
                 error_content = event.get("content") or event.get("message") or ""
                 if error_content:
@@ -108,34 +86,128 @@ class ExecutionTrace:
                     self.trace["error_message"] = error_content
                     self.trace["sql_status"] = "failed"
 
-            # 提取执行成功
             elif event_type == "sql-data":
                 self.trace["sql_status"] = "success"
 
-            # 提取步骤错误
             elif event_type == "step-error":
                 self.trace["sql_status"] = "failed"
                 step_error = event.get("message") or event.get("error") or ""
                 if step_error and not self.trace["error_message"]:
                     self.trace["error_message"] = step_error
 
-            # 提取完成事件
             elif event_type == "finish":
                 self.trace["success"] = True
 
-            # 提取问题改写信息（可能在其他事件类型中）
-            elif event_type == "question-enhance":
-                self.trace["question_rewrite_input"] = event.get("original", "")
-                self.trace["question_rewrite_output"] = event.get("enhanced", "")
-
-            # 提取SQL生成上下文
-            elif event_type == "sql-context":
-                self.trace["sql_gen_prompt"] = event.get("prompt", "")
-                self.trace["sql_gen_terminology"] = event.get("terminology", "")
-                self.trace["sql_gen_training_data"] = event.get("examples", "")
-
-        # 综合判断成功状态
         self._determine_success()
+
+    def parse_execution_trace(self, trace_nodes: List[Dict[str, Any]]):
+        """从执行轨迹API解析详细信息"""
+        for node in trace_nodes:
+            node_key = node.get("node_key")
+            input_payload = node.get("input_payload", {})
+            output_payload = node.get("output_payload", {})
+            
+            # 提取问题改写信息（prompt_build节点 - 所有路径都有）
+            if node_key == "prompt_build":
+                self.trace["question_rewrite_output"] = output_payload.get("enhanced_question", "")
+            
+            # 提取术语信息（terminology_retrieval节点）
+            elif node_key == "terminology_retrieval":
+                items = output_payload.get("items", [])
+                terms = []
+                for item in items:
+                    words = item.get("words", [])
+                    description = item.get("description", "")
+                    terms.append(f"{', '.join(words)}: {description}")
+                self.trace["sql_gen_terminology"] = "\n".join(terms)
+            
+            # 提取训练数据信息（training_retrieval节点）
+            elif node_key == "training_retrieval":
+                questions = output_payload.get("questions", [])
+                template_ids = output_payload.get("template_ids", [])
+                training_info = []
+                for i, q in enumerate(questions):
+                    template_id = template_ids[i] if i < len(template_ids) else ""
+                    training_info.append(f"模板{template_id}: {q}")
+                self.trace["sql_gen_training_data"] = "\n".join(training_info)
+            
+            # ========== 路径1：快速模板匹配成功 ==========
+            elif node_key == "quick_template_match":
+                # 检查模板是否匹配成功
+                response_text = output_payload.get("response_text", "")
+                try:
+                    response_json = json.loads(response_text)
+                    if response_json.get("success"):
+                        # 模板匹配成功，提取提示词
+                        messages = input_payload.get("messages", [])
+                        prompt_parts = []
+                        for msg in messages:
+                            content = msg.get("content", "")
+                            if content:
+                                prompt_parts.append(content[:500])
+                        self.trace["sql_gen_prompt"] = "\n\n".join(prompt_parts)
+                except json.JSONDecodeError:
+                    pass
+            
+            # ========== 路径2：快速模板匹配失败，走正常SQL生成路径 ==========
+            # 问题重写节点（模板匹配失败时出现）
+            elif node_key == "question_rewrite":
+                # 提取改写后的问题
+                rewritten_question = output_payload.get("rewritten_question", "")
+                if rewritten_question:
+                    self.trace["question_rewrite_output"] = rewritten_question
+                
+                # 提取输入问题（从input_payload的messages中）
+                messages = input_payload.get("messages", [])
+                for msg in messages:
+                    if msg.get("type") == "human":
+                        content = msg.get("content", "")
+                        # 从content中提取user-question
+                        if "<user-question>" in content:
+                            start = content.find("<user-question>") + len("<user-question>")
+                            end = content.find("</user-question>")
+                            if start > 0 and end > start:
+                                self.trace["question_rewrite_input"] = content[start:end].strip()
+            
+            # 问题重写汇总节点
+            elif node_key == "question_rewrite_summary":
+                self.trace["question_rewrite_input"] = self.trace["question_rewrite_input"] or input_payload.get("question_before", "")
+                self.trace["question_rewrite_output"] = self.trace["question_rewrite_output"] or output_payload.get("question_after", "")
+            
+            # SQL生成节点（模板匹配失败时出现）
+            elif node_key == "sql_generation":
+                # 提取SQL生成的提示词
+                messages = input_payload.get("messages", [])
+                prompt_parts = []
+                for msg in messages:
+                    content = msg.get("content", "")
+                    if content:
+                        prompt_parts.append(content[:500])
+                self.trace["sql_gen_prompt"] = "\n\n".join(prompt_parts)
+                
+                # 提取生成的SQL
+                response_text = output_payload.get("response_text", "")
+                try:
+                    response_json = json.loads(response_text)
+                    if response_json.get("success"):
+                        self.trace["sql_generated"] = response_json.get("sql", "")
+                except json.JSONDecodeError:
+                    pass
+            
+            # SQL执行结果（两种路径都有）
+            elif node_key == "sql_execution":
+                self.trace["sql_generated"] = input_payload.get("sql", "")
+                self.trace["row_count"] = output_payload.get("row_count", 0)
+                self.trace["sql_status"] = "success"
+            
+            # 分析结果
+            elif node_key == "analysis_generation":
+                self.trace["analysis_text"] = output_payload.get("analysis_text", "")
+            
+            # 提取步骤耗时
+            duration_ms = node.get("duration_ms", 0)
+            if duration_ms > 0:
+                self._update_step_duration_from_node(node_key, duration_ms)
 
     def _update_step_duration(self, step_name: str, duration_ms: int):
         """更新步骤耗时"""
@@ -155,15 +227,33 @@ class ExecutionTrace:
         if field_name:
             self.trace[field_name] = duration_ms
 
+    def _update_step_duration_from_node(self, node_key: str, duration_ms: int):
+        """从轨迹节点更新步骤耗时"""
+        step_mapping = {
+            "terminology_retrieval": "step_terminology_ms",
+            "training_retrieval": "step_training_ms",
+            "quick_template_match": "step_sql_gen_ms",
+            "question_rewrite": "step_question_enhance_ms",
+            "sql_generation": "step_sql_gen_ms",
+            "sql_execution": "step_sql_exec_ms",
+            "chart_generation": "step_chart_ms",
+            "analysis_generation": "step_analysis_ms",
+        }
+
+        field_name = step_mapping.get(node_key)
+        if field_name:
+            # 如果已经有值（比如模板匹配失败后又走了sql_generation），累加耗时
+            if self.trace[field_name] > 0:
+                self.trace[field_name] += duration_ms
+            else:
+                self.trace[field_name] = duration_ms
+
     def _determine_success(self):
         """综合判断成功状态"""
-        # 如果有明确的错误消息，标记为失败
         if self.trace.get("error_message"):
             self.trace["success"] = False
-        # 如果sql执行成功且有record_id，标记为成功
         elif self.trace["sql_status"] == "success" and self.trace["record_id"]:
             self.trace["success"] = True
-        # 如果是finish事件，标记为成功
         elif any(e.get("type") == "finish" for e in self.raw_events):
             self.trace["success"] = True
 
@@ -187,16 +277,8 @@ class ExecutionTrace:
                     self.trace["chart_type"] = chart_config.get("type", "")
                 except json.JSONDecodeError:
                     pass
-            if latest_record.get("analysis_answer"):
-                try:
-                    analysis = json.loads(latest_record.get("analysis_answer", "{}"))
-                    self.trace["analysis_text"] = analysis.get("content", "")
-                except json.JSONDecodeError:
-                    pass
-
-            # 从record中提取问题改写和SQL生成信息
+            if latest_record.get("analysis"):
+                self.trace["analysis_text"] = latest_record["analysis"]
+            
             if latest_record.get("question"):
                 self.trace["question_rewrite_input"] = self.trace["question_rewrite_input"] or latest_record["question"]
-            
-            if latest_record.get("enhanced_question"):
-                self.trace["question_rewrite_output"] = self.trace["question_rewrite_output"] or latest_record["enhanced_question"]

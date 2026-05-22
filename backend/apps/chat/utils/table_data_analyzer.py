@@ -163,6 +163,16 @@ def compute_table_summary(
             lines.append(f"[{i}] {cat_str}: {num_str}")
         if total_rows > MAX_BREAKDOWN_ROWS:
             lines.append(f"... (共 {total_rows} 行，以上仅展示前 {MAX_BREAKDOWN_ROWS} 行样本)")
+
+        # When sampling, also compute full category distributions so LLM sees
+        # accurate breakdowns (e.g. 境外=250, 境内=780) instead of sample-biased counts
+        if total_rows > MAX_BREAKDOWN_ROWS:
+            cat_dist_lines = _build_category_distributions(raw_data, keys, numeric_cols)
+            if cat_dist_lines:
+                lines.append("")
+                lines.append("【全量分类分布统计（非抽样，基于全部数据）】")
+                lines.extend(cat_dist_lines)
+
         result["breakdown_rows"] = sample_data
         result["breakdown_text"] = "\n".join(lines)
         result["row_count"] = total_rows
@@ -202,6 +212,36 @@ def compute_table_summary(
             result["is_detail_only"] = True
 
     return result
+
+
+def _build_category_distributions(
+    raw_data: List[Dict], keys: List[str], numeric_cols: List[str]
+) -> List[str]:
+    """Build full category distribution stats from ALL rows (not sampled).
+
+    Finds low-cardinality categorical columns (2-50 unique values) and returns
+    exact count distributions so the LLM can report accurate numbers even when
+    the detail sample is truncated.
+    """
+    if not raw_data or not keys:
+        return []
+    lines: List[str] = []
+    candidate_cols = [k for k in keys if k not in numeric_cols]
+    for col in candidate_cols:
+        counter: Counter[str] = Counter()
+        for row in raw_data:
+            v = row.get(col)
+            if v is not None:
+                s = str(v).strip()
+                if s:
+                    counter[s] += 1
+        uniq = len(counter)
+        if 2 <= uniq <= 50:
+            total = sum(counter.values())
+            items = counter.most_common()
+            dist_str = ", ".join(f"{name}={cnt}" for name, cnt in items)
+            lines.append(f"{col}: {dist_str} (总计 {total})")
+    return lines
 
 
 def _count_unique(data: List[Dict], key: str) -> int:

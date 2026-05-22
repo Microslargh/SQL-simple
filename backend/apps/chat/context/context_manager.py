@@ -41,7 +41,7 @@ class ContextStateManager:
         if not history_logs or len(history_logs) == 0:
             return current_question
 
-        # 语义层门控：仅“追问/指代”才允许进入问题增强链路。
+        # 语义层门控：仅"追问/指代"才允许进入问题增强链路。
         # 避免把新的独立问句误判为追问并继承上一轮限制条件。
         q = (current_question or "").strip()
         reference_words = ['这些', '它们', '上述', '上面', '刚才', '之前', '上一轮', '刚才的', '那些']
@@ -91,12 +91,34 @@ class ContextStateManager:
                     assistant_text = (record.analysis or "").strip()[:500]
             history_turns.append({"user": user_text, "assistant": assistant_text})
 
-        # 已含明确实体（省/市+指标/明细）时不再调 LLM，避免“过度增强”注入用户未提及的过滤条件（如存续、集团、压减）
+        # 已含明确实体（省/市+指标/明细）时不再调 LLM，避免"过度增强"注入用户未提及的过滤条件（如存续、集团、压减）
         if len(q) >= 8 and ("省" in q or "市" in q or "区" in q) and ("法人" in q or "户数" in q or "明细" in q or "详情" in q):
             _async_log_util.info(f"[问题增强] 当前问句已含明确地区与指标，跳过 LLM 与规则，直接返回: {q[:60]}")
             return current_question
 
-        # 仅“X月份”无年份时，优先用上一轮 SQL 时间补全年份，避免 LLM 误补成 2024 等
+        # 当前问句不含时间信息时，尝试从历史 SQL 提取时间并注入
+        time_keywords = ['年', '月', '日', '时间', '日期', '期', '本月', '本年', '今年', '去年', '前年', '明年']
+        has_time_in_current = any(kw in q for kw in time_keywords)
+        if not has_time_in_current:
+            latest_log = history_logs[-1]
+            if latest_log and getattr(latest_log, "pid", None):
+                record = self.session.get(ChatRecord, latest_log.pid)
+                if record and getattr(record, "sql", None) and record.sql:
+                    try:
+                        time_range = self.entity_extractor.extract_time_range(record.sql)
+                        if time_range and time_range.get("display"):
+                            time_display = time_range["display"]
+                            # Inject time at the beginning of the question
+                            enhanced = f"{time_display}，{current_question}"
+                            _async_log_util.info(
+                                f"[问题增强-时间注入] 当前问句无时间信息，从历史注入: "
+                                f"原始: {q[:60]}, 增强后: {enhanced[:80]}"
+                            )
+                            return enhanced
+                    except Exception as e:
+                        _async_log_util.debug(f"[问题增强-时间注入] 从历史SQL提取时间失败: {e}")
+
+        # 仅"X月份"无年份时，优先用上一轮 SQL 时间补全年份，避免 LLM 误补成 2024 等
         if re.search(r"(?:十一|十二|[一二三四五六七八九十])月份", q) and not re.search(r"\d{4}年", q):
             latest_log = history_logs[-1]
             if latest_log and getattr(latest_log, "pid", None):
@@ -120,7 +142,7 @@ class ContextStateManager:
                     except Exception as e:
                         _async_log_util.debug(f"[问题增强-月份] 从历史SQL取年份失败: {e}")
 
-        # 【治本】LLM 优先：若已配置且有多轮历史，先调 LLM；LLM 一旦返回有效结果则立即 return，严禁再执行任何规则，杜绝“LLM 结果被规则二次拼接”
+        # 【治本】LLM 优先：若已配置且有多轮历史，先调 LLM；LLM 一旦返回有效结果则立即 return，严禁再执行任何规则，杜绝"LLM 结果被规则二次拼接"
         api_url = (getattr(settings, "QUESTION_ENHANCE_API_URL", "") or "").strip().rstrip("/")
         if api_url and history_turns:
             reference_time_str = None

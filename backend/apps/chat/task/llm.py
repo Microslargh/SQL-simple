@@ -1138,33 +1138,11 @@ class LLMService:
         else:
             _async_log_util.info(f"[多轮对话] 无历史SQL日志，这是第一轮对话")
 
-        # 收集所有历史图表消息（从所有历史日志中）
-        all_chart_messages: List[dict[str, Any]] = []
-        if len(self.generate_chart_logs) > 0:
-            for log in self.generate_chart_logs:
-                if log.messages:
-                    # 从每条日志的messages中提取human和ai消息（跳过system消息）
-                    for msg in log.messages:
-                        if msg.get('type') in ['human', 'ai']:
-                            all_chart_messages.append(msg)
-
+        # 每个问题的图表是独立的，不累加历史图表消息，避免上下文爆炸
         self.chart_message = []
         # add sys prompt
         self.chart_message.append(SystemMessage(content=self.chat_question.chart_sys_question()))
-
-        if all_chart_messages and len(all_chart_messages) > 0:
-            # 图表消息通常不需要限制数量，因为每次对话通常只有一个图表
-            _async_log_util.info(f"[多轮对话] 加载历史图表消息: 总共 {len(all_chart_messages)} 条")
-            for chart_message in all_chart_messages:
-                _msg: BaseMessage
-                if chart_message.get('type') == 'human':
-                    _msg = HumanMessage(content=chart_message.get('content'))
-                    self.chart_message.append(_msg)
-                elif chart_message.get('type') == 'ai':
-                    _msg = AIMessage(content=chart_message.get('content'))
-                    self.chart_message.append(_msg)
-        else:
-            _async_log_util.info(f"[多轮对话] 无历史图表消息")
+        _async_log_util.info(f"[多轮对话] 图表消息仅保留当前轮 (不累加历史)")
 
     def init_straight_messages(self):
         """初始化快速模板匹配的消息列表，使用智能上下文管理"""

@@ -3322,6 +3322,15 @@ class LLMService:
                 fixed_columns = anchored_columns
             chart["columns"] = fixed_columns
 
+        # 确保 result_fields 的所有字段都在 columns 中，避免前端表格模式下丢失列
+        # （非 table 类型 LLM 只选图表可视化需要的字段，切换表格视图时需补全）
+        if fs and isinstance(chart.get("columns"), list):
+            existing_values = {str(c.get("value", "")).strip().lower() for c in chart["columns"] if isinstance(c, dict)}
+            for f in fs:
+                if str(f).strip().lower() not in existing_values:
+                    chart["columns"].append({"name": str(f), "value": str(f)})
+                    corrected += 1
+
         if chart.get("axis") and isinstance(chart.get("axis"), dict):
             for axis_key in ("x", "y", "series"):
                 axis_obj = chart.get("axis", {}).get(axis_key)

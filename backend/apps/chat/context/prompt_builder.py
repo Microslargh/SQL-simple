@@ -77,7 +77,10 @@ class ContextPromptBuilder:
         
         # 完整历史SQL（用于追问场景，提供表名和字段名参考）
         if context.history_sql:
-            parts.append(f'<history-sql>{context.history_sql}</history-sql>')
+            sql_text = context.history_sql
+            if len(sql_text) > 600:
+                sql_text = sql_text[:600] + "..."
+            parts.append(f'<history-sql>{sql_text}</history-sql>')
 
         # When time_range exists and current question lacks time info, inject explicit instruction
         if context.time_range and current_question:

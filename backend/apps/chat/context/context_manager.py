@@ -327,10 +327,9 @@ class ContextStateManager:
                     # 限制SQL长度，避免上下文过长（保留前500字符，通常包含表名和关键字段）
                     if len(history_sql) > 500:
                         # 尝试保留SELECT和FROM部分（最重要的表名和字段信息）
-                        import re
                         select_match = re.search(r'(SELECT.*?FROM.*?)(?:WHERE|GROUP|ORDER|LIMIT|$)', history_sql, re.IGNORECASE | re.DOTALL)
                         if select_match:
-                            history_sql = select_match.group(1) + "..."
+                            history_sql = select_match.group(1) + " WHERE ..."
                         else:
                             history_sql = history_sql[:500] + "..."
                     context.history_sql = history_sql

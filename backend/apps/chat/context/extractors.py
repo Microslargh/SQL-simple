@@ -16,7 +16,23 @@ class EntityReferenceExtractor:
     
     def __init__(self, session: Session):
         self.session = session
-    
+
+    @staticmethod
+    def _format_time_display(time_str: str) -> str:
+        """Convert raw time string to human-readable format.
+        202512 -> 2025年12月, 20251201 -> 2025年12月01日
+        """
+        if not time_str or len(time_str) < 6:
+            return str(time_str)
+        s = str(time_str)
+        if len(s) == 6:
+            y, m = s[:4], s[4:6]
+            return f"{y}年{m}月"
+        elif len(s) == 8:
+            y, m, d = s[:4], s[4:6], s[6:8]
+            return f"{y}年{m}月{d}日"
+        return s
+
     def extract_companies(self, history_data: Dict[str, Any], max_count: int = 50) -> List[str]:
         """从历史数据中提取公司列表（仅公司名）
         
@@ -89,13 +105,17 @@ class EntityReferenceExtractor:
             between_pattern_ym = r"(?:year_month|yearmonth|ym)\s*BETWEEN\s+['\"]?(\d{6})['\"]?\s+AND\s+['\"]?(\d{6})['\"]?"
             match = re.search(between_pattern_ym, history_sql, re.IGNORECASE)
             if match:
-                return {"start": match.group(1), "end": match.group(2), "format": "YYYYMM"}
+                start, end = match.group(1), match.group(2)
+                return {"start": start, "end": end, "format": "YYYYMM",
+                        "display": f"{EntityReferenceExtractor._format_time_display(start)} 至 {EntityReferenceExtractor._format_time_display(end)}"}
             
             # 2. 匹配 BETWEEN 'YYYYMMDD' AND 'YYYYMMDD' 格式（日期格式）
             between_pattern_date = r"(?:date|create_time|update_time)\s*BETWEEN\s+['\"]?(\d{8})['\"]?\s+AND\s+['\"]?(\d{8})['\"]?"
             match = re.search(between_pattern_date, history_sql, re.IGNORECASE)
             if match:
-                return {"start": match.group(1), "end": match.group(2), "format": "YYYYMMDD"}
+                start, end = match.group(1), match.group(2)
+                return {"start": start, "end": end, "format": "YYYYMMDD",
+                        "display": f"{EntityReferenceExtractor._format_time_display(start)} 至 {EntityReferenceExtractor._format_time_display(end)}"}
             
             # 3. 匹配通用的 BETWEEN 格式（不指定字段名）
             between_pattern_generic = r"BETWEEN\s+['\"]?(\d{6,8})['\"]?\s+AND\s+['\"]?(\d{6,8})['\"]?"
@@ -105,9 +125,11 @@ class EntityReferenceExtractor:
                 end = match.group(2)
                 # 根据长度判断格式
                 if len(start) == 6 and len(end) == 6:
-                    return {"start": start, "end": end, "format": "YYYYMM"}
+                    return {"start": start, "end": end, "format": "YYYYMM",
+                            "display": f"{EntityReferenceExtractor._format_time_display(start)} 至 {EntityReferenceExtractor._format_time_display(end)}"}
                 elif len(start) == 8 and len(end) == 8:
-                    return {"start": start, "end": end, "format": "YYYYMMDD"}
+                    return {"start": start, "end": end, "format": "YYYYMMDD",
+                            "display": f"{EntityReferenceExtractor._format_time_display(start)} 至 {EntityReferenceExtractor._format_time_display(end)}"}
             
             # 4. 匹配 >= 和 <= 组合（时间范围）
             gte_lte_pattern = r"(['\"]?\d{6,8}['\"]?)\s*>=\s*.*?(['\"]?\d{6,8}['\"]?)\s*<="
@@ -117,7 +139,8 @@ class EntityReferenceExtractor:
                 end = match.group(2).strip("'\"")
                 if len(start) == len(end):
                     format_type = "YYYYMM" if len(start) == 6 else "YYYYMMDD"
-                    return {"start": start, "end": end, "format": format_type}
+                    return {"start": start, "end": end, "format": format_type,
+                            "display": f"{EntityReferenceExtractor._format_time_display(start)} 至 {EntityReferenceExtractor._format_time_display(end)}"}
             
             # 5. 匹配 = 'YYYYMM' 或 = 'YYYYMMDD' 格式（单个时间点）
             equal_pattern = r"=\s+['\"]?(\d{6,8})['\"]?"
@@ -125,7 +148,8 @@ class EntityReferenceExtractor:
             if match:
                 time_value = match.group(1)
                 format_type = "YYYYMM" if len(time_value) == 6 else "YYYYMMDD"
-                return {"time": time_value, "format": format_type}
+                return {"time": time_value, "format": format_type,
+                        "display": EntityReferenceExtractor._format_time_display(time_value)}
             
             # 6. 匹配 IN ('YYYYMM', 'YYYYMM', ...) 格式（多个时间点）
             in_pattern = r"IN\s*\(\s*['\"]?(\d{6,8})['\"]?(?:\s*,\s*['\"]?\d{6,8}['\"]?)*\s*\)"
@@ -138,14 +162,16 @@ class EntityReferenceExtractor:
                     if len(time_values) == 1:
                         time_value = time_values[0]
                         format_type = "YYYYMM" if len(time_value) == 6 else "YYYYMMDD"
-                        return {"time": time_value, "format": format_type}
+                        return {"time": time_value, "format": format_type,
+                                "display": EntityReferenceExtractor._format_time_display(time_value)}
                     # 如果有多个值，返回范围
                     else:
                         sorted_values = sorted(time_values)
                         start = sorted_values[0]
                         end = sorted_values[-1]
                         format_type = "YYYYMM" if len(start) == 6 else "YYYYMMDD"
-                        return {"start": start, "end": end, "format": format_type}
+                        return {"start": start, "end": end, "format": format_type,
+                                "display": f"{EntityReferenceExtractor._format_time_display(start)} 至 {EntityReferenceExtractor._format_time_display(end)}"}
             
             return None
             

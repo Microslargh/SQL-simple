@@ -78,7 +78,7 @@ class ContextStateManager:
             return current_question
 
         # 构建多轮历史（供 LLM 使用）
-        max_turns = getattr(settings, "QUESTION_ENHANCE_MAX_TURNS", 5)
+        max_turns = getattr(settings, "QUESTION_ENHANCE_MAX_TURNS", 7)
         history_turns: List[dict] = []
         for log in history_logs[-max_turns:]:
             user_text = _get_user_question_for_log(log)

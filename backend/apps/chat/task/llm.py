@@ -187,6 +187,10 @@ class LLMService:
                 chat_question.db_schema = ""
 
         self.generate_sql_logs = list_generate_sql_logs(session=self.session, chart_id=chat_id, current_user=current_user)
+        # Enforce max conversation window to prevent context overflow
+        max_turns = getattr(settings, "QUESTION_ENHANCE_MAX_TURNS", 7)
+        if len(self.generate_sql_logs) > max_turns:
+            self.generate_sql_logs = self.generate_sql_logs[-max_turns:]
         self.generate_chart_logs = list_generate_chart_logs(session=self.session, chart_id=chat_id, current_user=current_user)
 
         self.change_title = len(self.generate_sql_logs) == 0

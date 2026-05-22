@@ -402,4 +402,4 @@ class ContextStateManager:
                         context.intent_summary = intent_summary
         
         # 构建提示
-        return self.prompt_builder.build(context)
+        return self.prompt_builder.build(context, current_question)

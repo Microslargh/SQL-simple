@@ -8,12 +8,13 @@ from common.utils.utils import _async_log_util
 class ContextPromptBuilder:
     """构建精简、结构化的上下文提示"""
     
-    def build(self, context: StructuredContext) -> Optional[str]:
+    def build(self, context: StructuredContext, current_question: Optional[str] = None) -> Optional[str]:
         """构建上下文提示字符串
-        
+
         Args:
             context: 结构化上下文信息
-            
+            current_question: 当前用户问题（用于判断是否需要显式时间继承指令）
+
         Returns:
             格式化的上下文提示字符串，如果无内容则返回None
         """
@@ -64,15 +65,28 @@ class ContextPromptBuilder:
             if 'start' in context.time_range and 'end' in context.time_range:
                 start = context.time_range['start']
                 end = context.time_range['end']
-                time_str = f"{start} 至 {end}"
+                # Use human-readable display if available
+                display = context.time_range.get('display', f"{start} 至 {end}")
+                time_str = display
                 parts.append(f'<time-range start="{start}" end="{end}" format="{time_format}">{time_str}</time-range>')
             elif 'time' in context.time_range:
                 time_value = context.time_range['time']
-                parts.append(f'<time-range time="{time_value}" format="{time_format}">{time_value}</time-range>')
+                display = context.time_range.get('display', str(time_value))
+                time_str = display
+                parts.append(f'<time-range time="{time_value}" format="{time_format}">{time_str}</time-range>')
         
         # 完整历史SQL（用于追问场景，提供表名和字段名参考）
         if context.history_sql:
             parts.append(f'<history-sql>{context.history_sql}</history-sql>')
+
+        # When time_range exists and current question lacks time info, inject explicit instruction
+        if context.time_range and current_question:
+            time_keywords = ['年', '月', '日', '时间', '日期', '期', '本月', '本年', '今年', '去年', '前年', '明年']
+            has_time = any(kw in current_question for kw in time_keywords)
+            if not has_time:
+                display = context.time_range.get('display', '')
+                if display:
+                    parts.append(f'<time-hint>注意：历史查询的时间范围为 {display}，当前问题未指定时间，请默认使用该时间范围。</time-hint>')
 
         if not parts:
             return None

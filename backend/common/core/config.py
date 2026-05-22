@@ -142,6 +142,7 @@ class Settings(BaseSettings):
     QUESTION_ENHANCE_TIMEOUT: float = Field(default=8.0, description="问题增强 LLM 调用超时秒数")
     QUESTION_ENHANCE_MAX_TURNS: int = Field(default=7, description="多轮对话历史窗口轮数（默认 7 轮）")
     MODEL_MAX_TOKENS: int = Field(default=65536, description="模型最大上下文窗口 token 数，用于守卫避免 400 错误")
+    ANALYSIS_DATA_ROW_LIMIT: int = Field(default=200, description="数据分析时传入 LLM 的最大数据行数，防止明细表上下文爆炸")
 
     # 隐式参数提取（模板中硬编码实体→用户实体对齐，与问题增强同方式 API 接入；留空则跳过）
     IMPLICIT_PARAM_EXTRACT_API_URL: str = Field(

@@ -1526,12 +1526,21 @@ class LLMService:
             if raw_data and total_rows > 0 and (not summary or not summary.get("has_numeric_breakdown")):
                 keys_preview = list((raw_data[0] or {}).keys())[:8] if raw_data else []
                 _async_log_util.info(f"[数据分析] 预分析未命中，将传原始数据。行数={total_rows}, 列名={keys_preview}")
-            ANALYSIS_DATA_ROW_LIMIT = int(getattr(settings, "ANALYSIS_DATA_ROW_LIMIT", 2000) or 2000)
+            ANALYSIS_DATA_ROW_LIMIT = int(getattr(settings, "ANALYSIS_DATA_ROW_LIMIT", 200) or 200)
+            ANALYSIS_DATA_MAX_CHARS = 30000  # ~15K tokens, keep safe headroom below 65K context
             if total_rows > ANALYSIS_DATA_ROW_LIMIT:
                 self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
                 _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析")
             else:
                 self.chat_question.data = orjson.dumps(raw_data).decode() if raw_data is not None else "[]"
+            # Belt-and-suspenders: if serialized data still too large, cap by char count
+            if len(self.chat_question.data or "") > ANALYSIS_DATA_MAX_CHARS:
+                truncated_rows = min(len(raw_data) if raw_data else 0, 50)
+                self.chat_question.data = orjson.dumps(raw_data[:truncated_rows]).decode() if raw_data else "[]"
+                _async_log_util.warning(
+                    f"[数据分析] 数据序列化后仍超 {ANALYSIS_DATA_MAX_CHARS} 字符，硬截断至前 {truncated_rows} 行 "
+                    f"(原始 {total_rows} 行)"
+                )
         
         # 传递SQL信息给数据分析模块，用于正确识别时间范围
         if self.record and self.record.sql:
@@ -1577,6 +1586,15 @@ class LLMService:
                                                                    'content': msg.content} for
                                                                   msg
                                                                   in analysis_msg])
+        # Token guard: prevent 400 error from context overflow
+        model_max_tokens = getattr(settings, "MODEL_MAX_TOKENS", 65536)
+        estimated = _estimate_tokens(analysis_msg)
+        safety_limit = int(model_max_tokens * 0.8)
+        if estimated > safety_limit:
+            err_msg = f"分析上下文长度超出限制：当前输入约 {estimated} tokens（模型上限 {model_max_tokens}，安全阈值 {safety_limit}）。建议：减少查询数据量或开启新对话。"
+            _async_log_util.warning(f"[Token守卫-分析] {err_msg}")
+            raise SingleMessageError(err_msg)
+
         full_thinking_text = ''
         full_analysis_text = ''
         token_usage = {}

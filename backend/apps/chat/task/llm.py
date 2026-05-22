@@ -1527,20 +1527,11 @@ class LLMService:
                 keys_preview = list((raw_data[0] or {}).keys())[:8] if raw_data else []
                 _async_log_util.info(f"[数据分析] 预分析未命中，将传原始数据。行数={total_rows}, 列名={keys_preview}")
             ANALYSIS_DATA_ROW_LIMIT = int(getattr(settings, "ANALYSIS_DATA_ROW_LIMIT", 200) or 200)
-            ANALYSIS_DATA_MAX_CHARS = 30000  # ~15K tokens, keep safe headroom below 65K context
             if total_rows > ANALYSIS_DATA_ROW_LIMIT:
                 self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
                 _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析")
             else:
                 self.chat_question.data = orjson.dumps(raw_data).decode() if raw_data is not None else "[]"
-            # Belt-and-suspenders: if serialized data still too large, cap by char count
-            if len(self.chat_question.data or "") > ANALYSIS_DATA_MAX_CHARS:
-                truncated_rows = min(len(raw_data) if raw_data else 0, 50)
-                self.chat_question.data = orjson.dumps(raw_data[:truncated_rows]).decode() if raw_data else "[]"
-                _async_log_util.warning(
-                    f"[数据分析] 数据序列化后仍超 {ANALYSIS_DATA_MAX_CHARS} 字符，硬截断至前 {truncated_rows} 行 "
-                    f"(原始 {total_rows} 行)"
-                )
         
         # 传递SQL信息给数据分析模块，用于正确识别时间范围
         if self.record and self.record.sql:

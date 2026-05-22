@@ -150,15 +150,24 @@ def compute_table_summary(
                 if v is not None:
                     total += v
             result["column_sums"][col] = int(total) if total == int(total) else round(total, 2)
+
+        MAX_BREAKDOWN_ROWS = 200
+        total_rows = len(raw_data)
+        sample_data = raw_data[:MAX_BREAKDOWN_ROWS]
         lines = []
-        for i, row in enumerate(raw_data, 1):
+        for i, row in enumerate(sample_data, 1):
             cat_parts = [str(row.get(k, "")) for k in category_cols]
             cat_str = " | ".join(cat_parts) if cat_parts else "-"
             num_parts = [f"{col}={row.get(col)}" for col in numeric_cols]
             num_str = ", ".join(num_parts)
             lines.append(f"[{i}] {cat_str}: {num_str}")
-        result["breakdown_rows"] = raw_data
+        if total_rows > MAX_BREAKDOWN_ROWS:
+            lines.append(f"... (共 {total_rows} 行，以上仅展示前 {MAX_BREAKDOWN_ROWS} 行样本)")
+        result["breakdown_rows"] = sample_data
         result["breakdown_text"] = "\n".join(lines)
+        result["row_count"] = total_rows
+        if total_rows > MAX_BREAKDOWN_ROWS:
+            result["is_sampled"] = True
         return result
 
     # 无数值列 或 伪数值列（明细表）：按分类列聚合

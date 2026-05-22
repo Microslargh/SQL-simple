@@ -72,6 +72,22 @@ warnings.filterwarnings("ignore")
 
 base_message_count_limit = 6
 
+# Token estimation: Chinese ~1.5 chars/token, English ~4 chars/token
+# Conservative estimate for mixed content using 2 chars/token
+def _estimate_tokens(messages: list) -> int:
+    """Estimate total tokens for a list of LangChain messages.
+    Conservative estimate: 2 chars per token for mixed Chinese/English content.
+    """
+    total_chars = 0
+    for msg in messages:
+        content = getattr(msg, 'content', '') or ''
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            # Handle multimodal content lists
+            total_chars += sum(len(part.get('text', '')) if isinstance(part, dict) else 0 for part in content)
+    return total_chars // 2  # conservative: 2 chars per token
+
 executor = ThreadPoolExecutor(max_workers=200)
 
 dynamic_ds_types = [1, 3]
@@ -2958,6 +2974,16 @@ class LLMService:
     def generate_chart(self, chart_type: Optional[str] = ''):
         # append current question
         self.chart_message.append(HumanMessage(self.chat_question.chart_user_question(chart_type)))
+
+        # Token guard: prevent 400 error from context overflow
+        model_max_tokens = getattr(settings, "MODEL_MAX_TOKENS", 65536)
+        estimated = _estimate_tokens(self.chart_message)
+        safety_limit = int(model_max_tokens * 0.8)  # 80% threshold
+        if estimated > safety_limit:
+            err_msg = f"上下文长度超出限制：当前输入约 {estimated} tokens（模型上限 {model_max_tokens}，安全阈值 {safety_limit}）。建议：开启新对话或缩短问题。"
+            _async_log_util.warning(f"[Token守卫-图表] {err_msg}")
+            raise SingleMessageError(err_msg)
+
         trace = self._trace_start(
             node_key="chart_generation",
             node_name="图表生成",
@@ -3866,6 +3892,15 @@ class LLMService:
                                     full_message=[
                                         {'type': msg.type, 'content': msg.content} for msg
                                         in self.straight_messages])
+
+            # Token guard for SQL generation (warning only, chart path is the critical blocker)
+            model_max_tokens = getattr(settings, "MODEL_MAX_TOKENS", 65536)
+            estimated_sql_tokens = _estimate_tokens(self.straight_messages)
+            safety_limit = int(model_max_tokens * 0.8)
+            if estimated_sql_tokens > safety_limit:
+                _async_log_util.warning(
+                    f"[Token守卫-SQL] straight_messages token估计: {estimated_sql_tokens} > 安全阈值 {safety_limit}"
+                )
 
             straight_sql_res = self.generate_straight_sql_info()
             full_straight_sql_text = ''

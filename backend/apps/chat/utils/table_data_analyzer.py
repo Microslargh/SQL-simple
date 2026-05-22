@@ -152,17 +152,19 @@ def compute_table_summary(
             result["column_sums"][col] = int(total) if total == int(total) else round(total, 2)
 
         MAX_BREAKDOWN_ROWS = 100
+        MAX_TEXT_LINES = 30  # text is redundant with data JSON; keep small
         total_rows = len(raw_data)
         sample_data = raw_data[:MAX_BREAKDOWN_ROWS]
         lines = []
-        for i, row in enumerate(sample_data, 1):
+        text_sample = sample_data[:MAX_TEXT_LINES]
+        for i, row in enumerate(text_sample, 1):
             cat_parts = [str(row.get(k, "")) for k in category_cols]
             cat_str = " | ".join(cat_parts) if cat_parts else "-"
             num_parts = [f"{col}={row.get(col)}" for col in numeric_cols]
             num_str = ", ".join(num_parts)
             lines.append(f"[{i}] {cat_str}: {num_str}")
         if total_rows > MAX_BREAKDOWN_ROWS:
-            lines.append(f"... (共 {total_rows} 行，以上仅展示前 {MAX_BREAKDOWN_ROWS} 行样本)")
+            lines.append(f"... (共 {total_rows} 行，以上仅展示前 {MAX_TEXT_LINES} 行文本样本，JSON数据含前 {MAX_BREAKDOWN_ROWS} 行)")
 
         # When sampling, also compute full category distributions so LLM sees
         # accurate breakdowns (e.g. 境外=250, 境内=780) instead of sample-biased counts
@@ -207,7 +209,7 @@ def compute_table_summary(
         if len(raw_data) > 50:
             result["has_numeric_breakdown"] = True
             result["column_sums"] = {}
-            result["breakdown_rows"] = raw_data[:200]
+            result["breakdown_rows"] = raw_data[:100]
             result["breakdown_text"] = f"共 {len(raw_data)} 条明细，列: {', '.join(keys)}"
             result["is_detail_only"] = True
 

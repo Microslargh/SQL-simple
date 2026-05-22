@@ -73,10 +73,10 @@ warnings.filterwarnings("ignore")
 base_message_count_limit = 6
 
 # Token estimation: Chinese ~1.5 chars/token, English ~4 chars/token
-# Realistic for mixed content: ~2.5 chars/token
+# Conservative estimate for mixed content using 2 chars/token
 def _estimate_tokens(messages: list) -> int:
     """Estimate total tokens for a list of LangChain messages.
-    Uses 2.5 chars per token for mixed Chinese/English content (realistic average).
+    Conservative estimate: 2 chars per token for mixed Chinese/English content.
     """
     total_chars = 0
     for msg in messages:
@@ -86,7 +86,7 @@ def _estimate_tokens(messages: list) -> int:
         elif isinstance(content, list):
             # Handle multimodal content lists
             total_chars += sum(len(part.get('text', '')) if isinstance(part, dict) else 0 for part in content)
-    return int(total_chars / 2.5)  # realistic: 2.5 chars per token for mixed content
+    return total_chars // 2  # conservative: 2 chars per token
 
 executor = ThreadPoolExecutor(max_workers=200)
 
@@ -1490,7 +1490,7 @@ class LLMService:
                 detail_sample_text = ""
                 if category_col and raw_data:
                     detail_sample_rows, detail_sample_text = build_detail_sample(
-                        raw_data, category_col, breakdown, max_per_category=4, max_total=120
+                        raw_data, category_col, breakdown, max_per_category=2, max_total=30
                     )
                 self.chat_question.data_summary = format_summary_for_prompt(summary, detail_sample_text)
                 data_payload: Dict[str, Any] = {"aggregates": compact_data}
@@ -1526,7 +1526,7 @@ class LLMService:
             if raw_data and total_rows > 0 and (not summary or not summary.get("has_numeric_breakdown")):
                 keys_preview = list((raw_data[0] or {}).keys())[:8] if raw_data else []
                 _async_log_util.info(f"[数据分析] 预分析未命中，将传原始数据。行数={total_rows}, 列名={keys_preview}")
-            ANALYSIS_DATA_ROW_LIMIT = int(getattr(settings, "ANALYSIS_DATA_ROW_LIMIT", 200) or 200)
+            ANALYSIS_DATA_ROW_LIMIT = int(getattr(settings, "ANALYSIS_DATA_ROW_LIMIT", 100) or 100)
             if total_rows > ANALYSIS_DATA_ROW_LIMIT:
                 self.chat_question.data = orjson.dumps(raw_data[:ANALYSIS_DATA_ROW_LIMIT]).decode()
                 _async_log_util.info(f"[数据分析] 数据共 {total_rows} 行，仅传前 {ANALYSIS_DATA_ROW_LIMIT} 行供分析")
@@ -1536,26 +1536,7 @@ class LLMService:
         # 传递SQL信息给数据分析模块，用于正确识别时间范围
         if self.record and self.record.sql:
             self.chat_question.sql = self.record.sql
-
-        # Hard cap on data payload: if serialized data still too large after all
-        # upstream sampling, truncate to keep total context safely below 65K
-        ANALYSIS_DATA_MAX_CHARS = 20000  # ~8K tokens at 2.5 chars/token
-        data_str = self.chat_question.data or ""
-        if len(data_str) > ANALYSIS_DATA_MAX_CHARS:
-            try:
-                parsed = orjson.loads(data_str)
-                if isinstance(parsed, list) and len(parsed) > 30:
-                    self.chat_question.data = orjson.dumps(parsed[:30]).decode()
-                    _async_log_util.warning(
-                        f"[数据分析] data 序列化 {len(data_str)} 字符超限，硬截断 "
-                        f"{len(parsed)} 行 → 30 行"
-                    )
-            except Exception:
-                self.chat_question.data = data_str[:ANALYSIS_DATA_MAX_CHARS]
-                _async_log_util.warning(
-                    f"[数据分析] data 无法解析为 JSON，截断至 {ANALYSIS_DATA_MAX_CHARS} 字符"
-                )
-
+        
         analysis_msg: List[Union[BaseMessage, dict[str, Any]]] = []
 
         ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
@@ -1576,6 +1557,21 @@ class LLMService:
 
         # 合并所有 custom_prompt 部分
         self.chat_question.custom_prompt = "\n\n".join(custom_prompt_parts) if custom_prompt_parts else ""
+
+        # Truncate large payloads before building analysis prompt to stay within context window
+        ANALYSIS_SQL_MAX_CHARS = 800
+        if self.chat_question.sql and len(self.chat_question.sql) > ANALYSIS_SQL_MAX_CHARS:
+            self.chat_question.sql = self.chat_question.sql[:ANALYSIS_SQL_MAX_CHARS] + "..."
+            _async_log_util.info(f"[数据分析] SQL 已截断至 {ANALYSIS_SQL_MAX_CHARS} 字符")
+        ANALYSIS_SUMMARY_MAX_CHARS = 12000
+        if self.chat_question.data_summary and len(self.chat_question.data_summary) > ANALYSIS_SUMMARY_MAX_CHARS:
+            self.chat_question.data_summary = self.chat_question.data_summary[:ANALYSIS_SUMMARY_MAX_CHARS] + "\n... (summary 已截断)"
+            _async_log_util.info(f"[数据分析] data_summary 已截断至 {ANALYSIS_SUMMARY_MAX_CHARS} 字符")
+        ANALYSIS_DATA_MAX_CHARS = 60000
+        if self.chat_question.data and len(self.chat_question.data) > ANALYSIS_DATA_MAX_CHARS:
+            self.chat_question.data = self.chat_question.data[:ANALYSIS_DATA_MAX_CHARS]
+            _async_log_util.warning(f"[数据分析] data JSON 已截断至 {ANALYSIS_DATA_MAX_CHARS} 字符")
+
         _async_log_util.info(
             f"[数据分析] 输入规模: question={len(self.chat_question.question or '')}, "
             f"fields={len(self.chat_question.fields or '')}, data={len(self.chat_question.data or '')}, "

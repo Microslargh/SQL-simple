@@ -73,10 +73,10 @@ warnings.filterwarnings("ignore")
 base_message_count_limit = 6
 
 # Token estimation: Chinese ~1.5 chars/token, English ~4 chars/token
-# Conservative estimate for mixed content using 2 chars/token
+# Realistic for mixed content: ~2.5 chars/token
 def _estimate_tokens(messages: list) -> int:
     """Estimate total tokens for a list of LangChain messages.
-    Conservative estimate: 2 chars per token for mixed Chinese/English content.
+    Uses 2.5 chars per token for mixed Chinese/English content (realistic average).
     """
     total_chars = 0
     for msg in messages:
@@ -86,7 +86,7 @@ def _estimate_tokens(messages: list) -> int:
         elif isinstance(content, list):
             # Handle multimodal content lists
             total_chars += sum(len(part.get('text', '')) if isinstance(part, dict) else 0 for part in content)
-    return total_chars // 2  # conservative: 2 chars per token
+    return int(total_chars / 2.5)  # realistic: 2.5 chars per token for mixed content
 
 executor = ThreadPoolExecutor(max_workers=200)
 
@@ -1536,7 +1536,26 @@ class LLMService:
         # 传递SQL信息给数据分析模块，用于正确识别时间范围
         if self.record and self.record.sql:
             self.chat_question.sql = self.record.sql
-        
+
+        # Hard cap on data payload: if serialized data still too large after all
+        # upstream sampling, truncate to keep total context safely below 65K
+        ANALYSIS_DATA_MAX_CHARS = 20000  # ~8K tokens at 2.5 chars/token
+        data_str = self.chat_question.data or ""
+        if len(data_str) > ANALYSIS_DATA_MAX_CHARS:
+            try:
+                parsed = orjson.loads(data_str)
+                if isinstance(parsed, list) and len(parsed) > 30:
+                    self.chat_question.data = orjson.dumps(parsed[:30]).decode()
+                    _async_log_util.warning(
+                        f"[数据分析] data 序列化 {len(data_str)} 字符超限，硬截断 "
+                        f"{len(parsed)} 行 → 30 行"
+                    )
+            except Exception:
+                self.chat_question.data = data_str[:ANALYSIS_DATA_MAX_CHARS]
+                _async_log_util.warning(
+                    f"[数据分析] data 无法解析为 JSON，截断至 {ANALYSIS_DATA_MAX_CHARS} 字符"
+                )
+
         analysis_msg: List[Union[BaseMessage, dict[str, Any]]] = []
 
         ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None

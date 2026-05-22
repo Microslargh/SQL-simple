@@ -151,7 +151,7 @@ def compute_table_summary(
                     total += v
             result["column_sums"][col] = int(total) if total == int(total) else round(total, 2)
 
-        MAX_BREAKDOWN_ROWS = 200
+        MAX_BREAKDOWN_ROWS = 100
         total_rows = len(raw_data)
         sample_data = raw_data[:MAX_BREAKDOWN_ROWS]
         lines = []

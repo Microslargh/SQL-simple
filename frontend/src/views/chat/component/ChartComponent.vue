@@ -14,6 +14,13 @@ function isCompositionQuestion(question: string | undefined): boolean {
   return false
 }
 
+/** 判断是否为少行多列场景，需要行转列（数据行<=2且列数>=6） */
+function isSingleRowMultiColumn(data: Array<ChartData>, axis: Array<ChartAxis>): boolean {
+  if (!data || data.length === 0 || data.length > 2) return false
+  if (!axis || axis.length < 6) return false
+  return true
+}
+
 const params = withDefaults(
   defineProps<{
     id: string | number
@@ -64,7 +71,10 @@ function renderChart() {
   if (chartInstance) {
     const tableOptions =
       params.type === 'table'
-        ? { showSummaryRow: !isCompositionQuestion(params.question) }
+        ? { 
+            showSummaryRow: !isCompositionQuestion(params.question) && !isSingleRowMultiColumn(params.data, axis.value),
+            transpose: isSingleRowMultiColumn(params.data, axis.value)
+          }
         : undefined
     chartInstance.init(axis.value, params.data, tableOptions)
     chartInstance.render()

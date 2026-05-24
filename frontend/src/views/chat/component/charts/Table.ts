@@ -2,6 +2,13 @@ import { BaseChart, type ChartAxis, type ChartData } from '@/views/chat/componen
 import { TableSheet, TableDataCell, type S2Options, type S2DataConfig, type S2MountContainer } from '@antv/s2'
 import { debounce } from 'lodash-es'
 
+/** 判断是否为少行多列场景，需要行转列 */
+export function isSingleRowMultiColumn(data: Array<ChartData>, axis: Array<ChartAxis>): boolean {
+  if (!data || data.length === 0 || data.length > 2) return false
+  if (!axis || axis.length < 6) return false
+  return true
+}
+
 /** 自定义数据单元格：序号列居中，其余列文字居左、数字居右 */
 function isNumericValue(value: unknown): boolean {
   if (value === null || value === undefined || value === '') return false
@@ -206,14 +213,62 @@ export class Table extends BaseChart {
     })
   }
 
+  /**
+   * 将少行多列数据转置为多行多列（序号、指标名称、各行列值）
+   */
+  private transposeSingleRowData(axis: Array<ChartAxis>, data: Array<ChartData>): { processedAxis: Array<ChartAxis>; processedData: Array<ChartData> } {
+    if (!data || data.length === 0) {
+      return { processedAxis: axis, processedData: [] }
+    }
+
+    // 定义转置后的列：序号、指标名称、各行列值
+    const transposedAxis: Array<ChartAxis> = [
+      { name: '序号', value: '__index__' },
+      { name: '指标名称', value: '__name__' },
+    ]
+    
+    // 根据数据行数添加值列
+    for (let i = 0; i < data.length; i++) {
+      transposedAxis.push({ name: `第${i + 1}行`, value: `__value_${i}__` })
+    }
+
+    // 转置数据
+    const transposedData: Array<ChartData> = []
+    let index = 1
+    
+    axis.forEach((col) => {
+      const row: ChartData = {
+        __index__: index++,
+        __name__: col.name || col.value,
+      }
+      
+      // 为每行数据添加对应的值
+      data.forEach((rowData, rowIndex) => {
+        const value = rowData[col.value]
+        const formattedValue = this.isNumericField(value) ? this.formatNumber(value) : value
+        row[`__value_${rowIndex}__`] = formattedValue
+      })
+      
+      transposedData.push(row)
+    })
+
+    return { processedAxis: transposedAxis, processedData: transposedData }
+  }
+
   // 处理数据：按行去重后添加序号列、格式化数值，可选添加汇总行（构成类问题不汇总）
   private processData(
     axis: Array<ChartAxis>,
     data: Array<ChartData>,
-    addSummaryRow: boolean = true
+    addSummaryRow: boolean = true,
+    transpose: boolean = false
   ): { processedAxis: Array<ChartAxis>; processedData: Array<ChartData> } {
     if (!data || data.length === 0) {
       return { processedAxis: axis, processedData: [] }
+    }
+
+    // 如果是单行多列场景且需要转置，直接转置数据
+    if (transpose) {
+      return this.transposeSingleRowData(axis, data)
     }
 
     const dataToProcess = this.deduplicateRows(axis, data)
@@ -251,9 +306,10 @@ export class Table extends BaseChart {
     return { processedAxis, processedData }
   }
 
-  init(axis: Array<ChartAxis>, data: Array<ChartData>, options?: { showSummaryRow?: boolean }) {
+  init(axis: Array<ChartAxis>, data: Array<ChartData>, options?: { showSummaryRow?: boolean; transpose?: boolean }) {
     const addSummaryRow = options?.showSummaryRow !== false
-    const { processedAxis, processedData } = this.processData(axis, data, addSummaryRow)
+    const transpose = options?.transpose === true
+    const { processedAxis, processedData } = this.processData(axis, data, addSummaryRow, transpose)
     
     super.init(processedAxis, processedData)
 

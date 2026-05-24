@@ -299,15 +299,10 @@ class AiModelQuestion(BaseModel):
                                                         custom_prompt=self.custom_prompt)
 
     def analysis_user_question(self):
-        # 构建SQL和时间范围信息（截断避免上下文爆炸）
+        # 构建SQL和时间范围信息（如果有）
         sql_info = ""
         if self.sql:
-            sql = self.sql.strip()
-            if len(sql) > 500:
-                import re as _re
-                m = _re.search(r'(SELECT.*?FROM.*?)(?:WHERE|GROUP|ORDER|LIMIT|$)', sql, _re.IGNORECASE | _re.DOTALL)
-                sql = (m.group(1) + " WHERE ...") if m else sql[:500] + "..."
-            sql_info = f"\n<sql>\n{sql}\n</sql>"
+            sql_info = f"\n<sql>\n{self.sql}\n</sql>"
         data_total_rows = self.data_total_rows if self.data_total_rows else ""
         data_summary = self.data_summary if self.data_summary else ""
         return get_analysis_template()['user'].format(

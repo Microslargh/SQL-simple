@@ -141,6 +141,9 @@ async def recommend_questions(session: SessionDep, current_user: CurrentUser, ch
     def _return_empty():
         yield 'data:' + orjson.dumps({'content': '[]', 'type': 'recommended_question'}).decode() + '\n\n'
 
+    if not settings.GUESS_RECOMMEND_ENABLED:
+        return StreamingResponse(_return_empty(), media_type="text/event-stream")
+
     try:
         record = get_chat_record_by_id(session, chat_record_id, current_user)
 

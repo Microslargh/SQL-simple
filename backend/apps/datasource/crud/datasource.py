@@ -447,6 +447,17 @@ def get_table_obj_by_ds(session: SessionDep, current_user: CurrentUser, ds: Core
     return _list
 
 
+def _use_custom_comment() -> bool:
+    """字段级自定义注释开关：开启时使用 custom_comment，关闭时使用数据库原始 field_comment"""
+    return getattr(settings, "USE_CUSTOM_COMMENT_ENABLED", False)
+
+
+def _get_field_comment_str(field: CoreField) -> str:
+    if _use_custom_comment() and field.custom_comment:
+        return field.custom_comment.strip()
+    return (field.field_comment or "").strip()
+
+
 def _build_schema_table_str(
         obj: TableAndFields,
         ds: CoreDatasource,
@@ -466,9 +477,7 @@ def _build_schema_table_str(
     if obj.fields:
         field_list = []
         for field in obj.fields:
-            field_comment = ''
-            if field.custom_comment:
-                field_comment = field.custom_comment.strip()
+            field_comment = _get_field_comment_str(field)
             hint_values = (value_hints or {}).get(field.field_name, [])
             hint_text = f" 值域示例: {' | '.join(hint_values)}" if hint_values else ""
             if field_comment == '':
@@ -510,7 +519,7 @@ def _keyword_score_table(obj: TableAndFields, keywords: List[str]) -> int:
             score += 4
         for field in obj.fields or []:
             field_name = (field.field_name or "").lower()
-            field_comment = (field.custom_comment or field.field_comment or "").lower()
+            field_comment = _get_field_comment_str(field).lower()
             if kw_l in field_name:
                 score += 3
             if kw_l in field_comment:
@@ -522,7 +531,7 @@ def _is_guess_deep_field(field: CoreField) -> bool:
     """判断字段是否适合注入值域示例（深表常见分类字段）。"""
     ft = (field.field_type or "").lower()
     name = (field.field_name or "").lower()
-    comment = (field.custom_comment or field.field_comment or "").lower()
+    comment = _get_field_comment_str(field).lower()
     is_text_like = any(t in ft for t in ["char", "text", "string", "varchar"])
     if not is_text_like:
         return False
@@ -792,9 +801,7 @@ def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDat
         if obj.fields:
             field_list = []
             for field in obj.fields:
-                field_comment = ''
-                if field.custom_comment:
-                    field_comment = field.custom_comment.strip()
+                field_comment = _get_field_comment_str(field)
                 if field_comment == '':
                     field_list.append(f"({field.field_name}:{field.field_type})")
                 else:

@@ -4,8 +4,8 @@ import { debounce } from 'lodash-es'
 
 /** 判断是否为少行多列场景，需要行转列 */
 export function isSingleRowMultiColumn(data: Array<ChartData>, axis: Array<ChartAxis>): boolean {
-  if (!data || data.length === 0 || data.length > 2) return false
-  if (!axis || axis.length < 6) return false
+  if (!data || data.length === 0 || data.length > 1) return false
+  if (!axis || axis.length < 4) return false
   return true
 }
 
@@ -214,41 +214,72 @@ export class Table extends BaseChart {
   }
 
   /**
-   * 将少行多列数据转置为多行多列（序号、指标名称、各行列值）
+   * 将少行多列数据转置为多行多列（序号、指标名称、各行列值）。
+   *
+   * 关键设计：动态检测"行标识符列"——在原始列中找到一列，其每行取值互不相同且非空，
+   * 用这些值命名转置后的值列（如 "2024年"/"2025年"），同时跳过该标识符列以避免
+   * 在表格中重复展示。
    */
   private transposeSingleRowData(axis: Array<ChartAxis>, data: Array<ChartData>): { processedAxis: Array<ChartAxis>; processedData: Array<ChartData> } {
     if (!data || data.length === 0) {
       return { processedAxis: axis, processedData: [] }
     }
 
-    // 定义转置后的列：序号、指标名称、各行列值
+    /** 查找最适合作为行标识符的列：所有行都有互不相同的非空值，优先非数值列 */
+    const findIdentifierColumn = (): { colIndex: number; values: string[] } | null => {
+      for (let colIdx = 0; colIdx < axis.length; colIdx++) {
+        const col = axis[colIdx]
+        const values = data.map(row => row[col.value])
+        // 所有行都有非空值
+        if (!values.every(v => v != null && String(v).trim() !== '')) continue
+        const strValues = values.map(v => String(v))
+        // 值互不相同
+        if (new Set(strValues).size !== data.length) continue
+        // 优先非数值（数值不适合做列标题），若全是数值也可接受
+        const allNumeric = strValues.every(v => this.isNumericField(v))
+        if (!allNumeric) return { colIndex: colIdx, values: strValues }
+        // 数值但互不相同也接受，继续找更合适的
+        if (colIdx === axis.length - 1) return { colIndex: colIdx, values: strValues }
+      }
+      return null
+    }
+
+    const idColumn = findIdentifierColumn()
+
+    // 获取值列的显示名称
+    const getValueColumnName = (rowIndex: number): string => {
+      if (idColumn) return idColumn.values[rowIndex]
+      if (data.length === 1) return '值'
+      return `第${rowIndex + 1}行`
+    }
+
+    // 构建转置后的列：序号 + 指标名称 + N个值列
     const transposedAxis: Array<ChartAxis> = [
       { name: '序号', value: '__index__' },
       { name: '指标名称', value: '__name__' },
     ]
-    
-    // 根据数据行数添加值列
     for (let i = 0; i < data.length; i++) {
-      transposedAxis.push({ name: `第${i + 1}行`, value: `__value_${i}__` })
+      transposedAxis.push({ name: getValueColumnName(i), value: `__value_${i}__` })
     }
 
-    // 转置数据
+    // 构建转置后的数据：每个原始列变为一行，跳过标识符列
     const transposedData: Array<ChartData> = []
     let index = 1
-    
-    axis.forEach((col) => {
+
+    axis.forEach((col, colIdx) => {
+      if (idColumn && colIdx === idColumn.colIndex) return
+
       const row: ChartData = {
         __index__: index++,
         __name__: col.name || col.value,
       }
-      
-      // 为每行数据添加对应的值
+
       data.forEach((rowData, rowIndex) => {
         const value = rowData[col.value]
         const formattedValue = this.isNumericField(value) ? this.formatNumber(value) : value
         row[`__value_${rowIndex}__`] = formattedValue
       })
-      
+
       transposedData.push(row)
     })
 

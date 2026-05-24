@@ -3223,15 +3223,11 @@ class LLMService:
         token = re.sub(r"[\s\-_]+", "", token)
         return token
 
-    @staticmethod
-    def _contains_cjk(text: str) -> bool:
-        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
-
     def _resolve_chart_display_name(self, model_name: Optional[str], resolved_value: str, chart_type: str) -> str:
         """
-        在“保留模型生成能力”和“锚定 SQL 别名”间折中：
-        - table 场景更保守，优先避免模型把列名泛化成无关词；
-        - 非 table 场景保留模型命名（可读性优先）。
+        决定图表列头显示名称。
+        - table 场景：始终使用 SQL AS 别名作为列头，确保列名与用户 SQL 定义一致。
+        - 非 table 场景：保留模型命名（可读性优先）。
         """
         fallback = str(resolved_value or "").strip()
         if not fallback:
@@ -3243,24 +3239,8 @@ class LLMService:
         if self._normalize_field_token(raw_name) == self._normalize_field_token(fallback):
             return raw_name
 
-        if chart_type != "table":
-            return raw_name
-
-        generic_names = {
-            "企业数量", "数量", "企业类型", "类型", "值", "数值", "指标", "维度",
-            "名称", "类别", "字段", "category", "value", "count", "type", "metric",
-        }
-        if raw_name.lower() in generic_names:
+        if chart_type == "table":
             return fallback
-        if len(raw_name) <= 1:
-            return fallback
-
-        # 若 SQL 别名本身是中文，且模型名与其毫无中文重叠，则判定为偏差，回退到 SQL 别名。
-        if self._contains_cjk(fallback):
-            fallback_cjk = set(re.findall(r"[\u4e00-\u9fff]", fallback))
-            raw_cjk = set(re.findall(r"[\u4e00-\u9fff]", raw_name))
-            if not raw_cjk or not (fallback_cjk & raw_cjk):
-                return fallback
         return raw_name
 
     def _resolve_chart_field(self, value: Optional[str], name: Optional[str], result_fields: List[str]) -> Optional[str]:

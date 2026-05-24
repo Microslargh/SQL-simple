@@ -132,3 +132,13 @@ PostgreSQL (主要，含 pgvector) + MySQL、SQL Server、Oracle、ClickHouse、
 
 后端: pytest + coverage，配置见 `backend/pyproject.toml`。测试文件位于 `tests/`。
 前端: ESLint + vue-tsc 类型检查。
+
+## 编辑注意事项
+
+### Python 文件中的 Unicode 转义序列
+
+`Read` 工具会将文件中的 `\uXXXX` 转义序列渲染为实际 Unicode 字符（如 `一-鿿` 显示为 `一-鿿`）。但 Python 源文件里存储的是**字面的反斜杠-u 转义序列**。
+
+**规则**：使用 `Edit` 工具编辑包含 `\uXXXX` 的 Python 代码时，old_string 中应使用 Read 工具显示的实际 Unicode 字符，而非字面的 `\uXXXX`。如果 Edit 反复失败（"String to replace not found"），改用 `python -c` 通过 Bash 工具按行号操作，避免字符集不匹配。
+
+**已验证**：Edit 工具能够匹配 Read 渲染后的实际 Unicode 字符；两次失败通常是因为 Bash 环境打印时二次转码导致乱码，不是 Edit 本身的问题。优先信任 Edit + Read 的组合，仅在连续两次失败后回退到 Python 行号操作。

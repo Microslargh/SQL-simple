@@ -41,7 +41,7 @@ dmypy.json
 .pyre/
 .pytype/
 cython_debug/
-
+docs/bugger/
 # Node.js
 node_modules/
 npm-debug.log*

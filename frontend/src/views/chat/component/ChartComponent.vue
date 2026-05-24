@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { getChartInstance } from '@/views/chat/component/index.ts'
 import type { BaseChart, ChartAxis, ChartData } from '@/views/chat/component/BaseChart.ts'
+import { isSingleRowMultiColumn } from '@/views/chat/component/charts/Table.ts'
 import { useEmitt } from '@/utils/useEmitt.ts'
 
 /** 是否为不展示汇总行的问题：构成类（如两金构成）、一利五率等已是总-分或指标结构，表格不展示汇总行避免重复相加 */
@@ -12,13 +13,6 @@ function isCompositionQuestion(question: string | undefined): boolean {
   if (q.includes('两金') && q.includes('构成')) return true
   if (q.includes('一利五率')) return true
   return false
-}
-
-/** 判断是否为少行多列场景，需要行转列（数据行<=2且列数>=6） */
-function isSingleRowMultiColumn(data: Array<ChartData>, axis: Array<ChartAxis>): boolean {
-  if (!data || data.length === 0 || data.length > 2) return false
-  if (!axis || axis.length < 6) return false
-  return true
 }
 
 const params = withDefaults(

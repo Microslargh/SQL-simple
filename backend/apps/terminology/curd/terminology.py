@@ -490,6 +490,9 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
         return []
 
     _list: List[Terminology] = []
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"[术语检索-ILIKE] 输入问句: {word[:120]} | oid={oid} | datasource={datasource}")
 
     stmt = (
         select(
@@ -523,16 +526,20 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
 
     results = session.execute(stmt, params).fetchall()
 
+    logger.info(f"[术语检索-ILIKE] 命中 {len(results)} 条: {[(row.id, row.word, row.pid) for row in results]}")
+
     for row in results:
         _list.append(Terminology(id=row.id, word=row.word, pid=row.pid))
 
-    if settings.EMBEDDING_ENABLED:
+    if settings.EMBEDDING_ENABLED and getattr(settings, 'EMBEDDING_TERMINOLOGY_ENABLED', True):
         with session.begin_nested():
             try:
                 model = EmbeddingModelCache.get_model()
+                logger.info(f"[术语检索-Embedding] 开始向量检索，阈值={settings.EMBEDDING_TERMINOLOGY_SIMILARITY}, TopK={settings.EMBEDDING_TERMINOLOGY_TOP_COUNT}")
 
                 embedding = model.embed_query(word)
                 embedding = ensure_embedding_dimension(embedding)
+                logger.info(f"[术语检索-Embedding] 问句向量维度={len(embedding)}, 前5值={embedding[:5]}")
 
                 if datasource is not None:
                     results = session.execute(text(embedding_sql_with_datasource),
@@ -542,13 +549,17 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
                     results = session.execute(text(embedding_sql),
                                               {'embedding_array': str(embedding), 'oid': oid}).fetchall()
 
+                logger.info(f"[术语检索-Embedding] 命中 {len(results)} 条: {[(row.id, row.word, round(row.similarity, 4) if hasattr(row, 'similarity') else '?', row.pid) for row in results]}")
+
                 for row in results:
                     _list.append(Terminology(id=row.id, word=row.word, pid=row.pid))
 
             except Exception:
                 SQLBotLogUtil.exception("Terminology embedding query failed")
+                logger.error(f"[术语检索-Embedding] 向量检索失败: {traceback.format_exc()}")
                 session.rollback()
 
+    # 去重：同一术语族（相同 pid 或 id）只保留一条
     _map: dict = {}
     _ids: list[int] = []
     for row in _list:
@@ -559,7 +570,10 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
         else:
             _ids.append(row.id)
 
+    logger.info(f"[术语检索-去重] 合并前 {len(_list)} 条，去重后 {len(_ids)} 个术语族，IDs={_ids}")
+
     if len(_ids) == 0:
+        logger.info(f"[术语检索-结果] 最终命中 0 条术语")
         return []
 
     t_list = session.query(Terminology.id, Terminology.pid, Terminology.word, Terminology.description).filter(
@@ -574,6 +588,7 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
     for key in _map.keys():
         _results.append(_map.get(key))
 
+    logger.info(f"[术语检索-结果] 最终命中 {len(_results)} 条术语: {[r['words'] for r in _results]}")
     return _results
 
 

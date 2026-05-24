@@ -198,6 +198,10 @@ class RenameChat(BaseModel):
     brief: str = ''
 
 
+class BatchDeleteChatRequest(BaseModel):
+    chat_ids: List[int]
+
+
 class ChatInfo(BaseModel):
     id: Optional[int] = None
     create_time: datetime = None

@@ -10,11 +10,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, select
 from common.utils.utils import SQLBotLogUtil
+from common.core.config import settings
 
 from apps.chat.curd.chat import list_chats, get_chat_with_records, create_chat, rename_chat, \
-    delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, get_chat_record_by_id, \
+    delete_chat, batch_delete_chats, get_chat_chart_data, get_chat_predict_data, \
+    get_chat_with_records_with_data, get_chat_record_by_id, \
     create_error_query_record, list_execution_traces
-from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, ExcelData
+from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, ExcelData, \
+    BatchDeleteChatRequest
 from apps.chat.task.llm import LLMService
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser, Trans
 
@@ -74,6 +77,18 @@ async def chat_execution_trace(session: SessionDep, chat_record_id: int, current
 async def rename(session: SessionDep, chat: RenameChat, current_user: CurrentUser):
     try:
         return rename_chat(session=session, rename_object=chat, current_user=current_user)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
+@router.post("/delete/batch")
+async def batch_delete(session: SessionDep, current_user: CurrentUser, body: BatchDeleteChatRequest):
+    try:
+        deleted_count = batch_delete_chats(session, body.chat_ids, current_user)
+        return {"code": 200, "message": f"Successfully deleted {deleted_count} chats", "deleted_count": deleted_count}
     except Exception as e:
         raise HTTPException(
             status_code=500,

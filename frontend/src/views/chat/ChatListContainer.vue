@@ -9,11 +9,8 @@ import ChatCreator from '@/views/chat/ChatCreator.vue'
 import { useAssistantStore } from '@/stores/assistant'
 import icon_sidebar_outlined from '@/assets/svg/icon_sidebar_outlined.svg'
 import icon_new_chat_outlined from '@/assets/svg/icon_new_chat_outlined.svg'
-// import { useUserStore } from '@/stores/user'
-// import router from '@/router'
 import { datasourceApi } from '@/api/datasource.ts'
-// import { ElMessageBox } from 'element-plus'
-// const userStore = useUserStore()
+import dayjs from 'dayjs'
 const props = withDefaults(
   defineProps<{
     inPopover?: boolean
@@ -50,6 +47,92 @@ const assistantStore = useAssistantStore()
 const isCompletePage = computed(() => !assistantStore.getAssistant || assistantStore.getEmbedded)
 
 const search = ref<string>()
+
+// 批量管理模式
+const batchMode = ref(false)
+const selectedChatIds = ref<Set<number>>(new Set())
+const selectedCount = computed(() => selectedChatIds.value.size)
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value
+  if (!batchMode.value) {
+    selectedChatIds.value = new Set()
+  }
+}
+
+function onSelectionChanged(ids: Set<number>) {
+  selectedChatIds.value = ids
+}
+
+function selectByPeriod(hours: number | null) {
+  const now = dayjs()
+  const newSelected = new Set<number>()
+
+  for (const chat of _chatList.value) {
+    if (!chat.create_time) continue
+    const chatTime = dayjs(chat.create_time)
+
+    if (hours === null) {
+      // 更早以前：1周前
+      const weekAgo = now.subtract(168, 'hour')
+      if (chatTime.isBefore(weekAgo)) {
+        newSelected.add(chat.id!)
+      }
+    } else if (hours === -1) {
+      // 全部选中
+      newSelected.add(chat.id!)
+    } else {
+      const cutoff = now.subtract(hours, 'hour')
+      if (chatTime.isAfter(cutoff)) {
+        newSelected.add(chat.id!)
+      }
+    }
+  }
+
+  selectedChatIds.value = newSelected
+}
+
+async function onBatchDelete() {
+  if (selectedChatIds.value.size === 0) return
+
+  await ElMessageBox.confirm(
+    t('qa.batch_delete_confirm', { count: selectedChatIds.value.size }),
+    {
+      confirmButtonType: 'danger',
+      tip: t('common.proceed_with_caution'),
+      confirmButtonText: t('dashboard.delete'),
+      cancelButtonText: t('common.cancel'),
+      customClass: 'confirm-no_icon',
+      autofocus: false,
+    }
+  )
+
+  _loading.value = true
+  try {
+    const ids = Array.from(selectedChatIds.value)
+    await chatApi.batchDeleteChat(ids)
+    ElMessage({
+      type: 'success',
+      message: t('dashboard.delete_success'),
+    })
+    // 从列表中移除已删除项
+    _chatList.value = _chatList.value.filter(c => !ids.includes(c.id!))
+    // 如果当前对话被删，回到空状态
+    if (_currentChatId.value && ids.includes(_currentChatId.value)) {
+      goEmpty()
+    }
+    batchMode.value = false
+    selectedChatIds.value = new Set()
+    emits('onChatDeleted', ids)
+  } catch (err: any) {
+    ElMessage({
+      type: 'error',
+      message: err.message,
+    })
+  } finally {
+    _loading.value = false
+  }
+}
 
 const _currentChatId = computed({
   get() {
@@ -259,7 +342,22 @@ function onChatRenamed(chat: Chat) {
         :placeholder="t('qa.chat_search')"
         clearable
       />
+      <div class="batch-toggle-row">
+        <el-button v-if="!batchMode" text size="small" @click="toggleBatchMode">
+          {{ t('qa.manage') }}
+        </el-button>
+        <el-button v-else text size="small" type="primary" @click="toggleBatchMode">
+          {{ t('qa.exit_manage') }}
+        </el-button>
+      </div>
     </el-header>
+    <div v-if="batchMode" class="batch-bar">
+      <el-button size="small" @click="selectByPeriod(1)">{{ t('qa.last_hour') }}</el-button>
+      <el-button size="small" @click="selectByPeriod(24)">{{ t('qa.last_day') }}</el-button>
+      <el-button size="small" @click="selectByPeriod(168)">{{ t('qa.last_week') }}</el-button>
+      <el-button size="small" @click="selectByPeriod(null)">{{ t('qa.earlier') }}</el-button>
+      <el-button size="small" @click="selectByPeriod(-1)">{{ t('qa.select_all') }}</el-button>
+    </div>
     <el-main class="chat-list">
       <div v-if="!computedChatList.length" class="empty-search">
         {{ !!search ? $t('datasource.relevant_content_found') : $t('dashboard.no_chat') }}
@@ -269,11 +367,20 @@ function onChatRenamed(chat: Chat) {
         v-model:loading="_loading"
         :current-chat-id="_currentChatId"
         :chat-list="computedChatList"
+        :batch-mode="batchMode"
+        :selected-ids="selectedChatIds"
         @chat-selected="onClickHistory"
         @chat-deleted="onChatDeleted"
         @chat-renamed="onChatRenamed"
+        @selection-changed="onSelectionChanged"
       />
     </el-main>
+    <div v-if="batchMode && selectedCount > 0" class="batch-footer">
+      <span class="batch-footer-text">{{ t('qa.selected_count', { count: selectedCount }) }}</span>
+      <el-button type="danger" size="small" @click="onBatchDelete">
+        {{ t('qa.batch_delete') }}
+      </el-button>
+    </div>
 
     <ChatCreator v-if="isCompletePage" ref="chatCreatorRef" @on-chat-created="onChatCreated" />
   </el-container>
@@ -357,6 +464,37 @@ function onChatRenamed(chat: Chat) {
       font-weight: 400;
       font-size: 14px;
       line-height: 22px;
+    }
+  }
+
+  .batch-toggle-row {
+    width: 100%;
+    display: flex;
+    justify-content: flex-end;
+    margin-top: -8px;
+  }
+
+  .batch-bar {
+    padding: 0 16px 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .batch-footer {
+    position: sticky;
+    bottom: 0;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(245, 246, 247, 0.95);
+    border-top: 1px solid #dee0e3;
+    z-index: 10;
+
+    &-text {
+      font-size: 13px;
+      color: #646a73;
     }
   }
 }

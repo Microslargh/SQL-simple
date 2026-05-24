@@ -322,6 +322,9 @@ export const chatApi = {
   deleteChat: (id: number | undefined): Promise<string> => {
     return request.get(`/chat/delete/${id}`)
   },
+  batchDeleteChat: (ids: number[]): Promise<any> => {
+    return request.post('/chat/delete/batch', { chat_ids: ids })
+  },
   analysis: (record_id: number | undefined, controller?: AbortController) => {
     return request.fetchStream(`/chat/record/${record_id}/analysis`, {}, controller)
   },

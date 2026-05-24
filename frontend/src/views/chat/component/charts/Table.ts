@@ -225,21 +225,23 @@ export class Table extends BaseChart {
       return { processedAxis: axis, processedData: [] }
     }
 
-    /** 查找最适合作为行标识符的列：所有行都有互不相同的非空值，优先非数值列 */
+    // 先对 axis 去重（后端可能下发重复列定义，导致转置后出现重复行）
+    const dedupedAxis = axis.filter(
+      (col, idx, arr) => arr.findIndex(c => c.value === col.value) === idx
+    )
+
+    /** 在去重后的 axis 中查找最适合作为行标识符的列 */
     const findIdentifierColumn = (): { colIndex: number; values: string[] } | null => {
-      for (let colIdx = 0; colIdx < axis.length; colIdx++) {
-        const col = axis[colIdx]
+      if (data.length < 2) return null
+      for (let colIdx = 0; colIdx < dedupedAxis.length; colIdx++) {
+        const col = dedupedAxis[colIdx]
         const values = data.map(row => row[col.value])
-        // 所有行都有非空值
         if (!values.every(v => v != null && String(v).trim() !== '')) continue
         const strValues = values.map(v => String(v))
-        // 值互不相同
         if (new Set(strValues).size !== data.length) continue
-        // 优先非数值（数值不适合做列标题），若全是数值也可接受
+        // 优先非数值列（数值不适合做列标题）
         const allNumeric = strValues.every(v => this.isNumericField(v))
         if (!allNumeric) return { colIndex: colIdx, values: strValues }
-        // 数值但互不相同也接受，继续找更合适的
-        if (colIdx === axis.length - 1) return { colIndex: colIdx, values: strValues }
       }
       return null
     }
@@ -262,11 +264,11 @@ export class Table extends BaseChart {
       transposedAxis.push({ name: getValueColumnName(i), value: `__value_${i}__` })
     }
 
-    // 构建转置后的数据：每个原始列变为一行，跳过标识符列
+    // 构建转置后的数据：每个去重后的原始列变为一行，跳过标识符列
     const transposedData: Array<ChartData> = []
     let index = 1
 
-    axis.forEach((col, colIdx) => {
+    dedupedAxis.forEach((col, colIdx) => {
       if (idColumn && colIdx === idColumn.colIndex) return
 
       const row: ChartData = {

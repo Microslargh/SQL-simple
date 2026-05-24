@@ -75,12 +75,12 @@ class ContextPromptBuilder:
                 time_str = display
                 parts.append(f'<time-range time="{time_value}" format="{time_format}">{time_str}</time-range>')
         
-        # 完整历史SQL（用于追问场景，提供表名和字段名参考）
-        if context.history_sql:
-            sql_text = context.history_sql
-            if len(sql_text) > 600:
-                sql_text = sql_text[:600] + "..."
-            parts.append(f'<history-sql>{sql_text}</history-sql>')
+        # 历史用户问题（用于追问场景，帮助 LLM 理解上下文意图）
+        if context.history_question:
+            question_text = context.history_question
+            if len(question_text) > 300:
+                question_text = question_text[:300] + "..."
+            parts.append(f'<history-question>{question_text}</history-question>')
 
         # When time_range exists and current question lacks time info, inject explicit instruction
         if context.time_range and current_question:

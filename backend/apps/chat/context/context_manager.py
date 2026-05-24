@@ -316,24 +316,24 @@ class ContextStateManager:
             except Exception as e:
                 _async_log_util.debug(f"[上下文管理] 提取时间范围失败: {e}")
         
-        # 2.6. 提取完整历史SQL（用于追问场景，提供表名和字段名参考）
-        # 当检测到追问（时间/地区/指标/公司主体）时，提供完整的历史SQL作为参考
+        # 2.6. 提取历史问题（用于 SQL 生成阶段，帮助 LLM 理解上下文意图）
+        # 当检测到追问（时间/地区/指标/公司主体）时，提供历史问题作为参考
         if (needs.needs_terminology_enhancement or needs.needs_intent_context) and latest_log.pid:
             try:
                 record = self.session.get(ChatRecord, latest_log.pid)
-                if record and record.sql and record.sql.strip():
-                    # 提取完整的历史SQL（限制长度，避免过长）
-                    history_sql = record.sql.strip()
-                    # 限制SQL长度，避免上下文过长（保留前500字符，通常包含表名和关键字段）
-                    if len(history_sql) > 500:
-                        # 尝试保留SELECT和FROM部分（最重要的表名和字段信息）
-                        select_match = re.search(r'(SELECT.*?FROM.*?)(?:WHERE|GROUP|ORDER|LIMIT|$)', history_sql, re.IGNORECASE | re.DOTALL)
-                        if select_match:
-                            history_sql = select_match.group(1) + " WHERE ..."
-                        else:
-                            history_sql = history_sql[:500] + "..."
-                    context.history_sql = history_sql
-                    _async_log_util.info(f"[上下文管理] 提取到历史SQL（用于追问参考），长度: {len(history_sql)} 字符")
+                if record:
+                    # 提取历史用户问题
+                    history_question = None
+                    if latest_log.messages:
+                        for msg in latest_log.messages:
+                            if msg.get('type') == 'human':
+                                content = (msg.get('content') or '').strip()
+                                if content and not content.startswith('<context>') and not content.startswith('<time-range') and not content.startswith('<history'):
+                                    history_question = content
+                                    break
+                    if history_question:
+                        context.history_question = history_question[:500]  # 截断，避免过长
+                        _async_log_util.info(f"[上下文管理] 提取到历史问题，长度: {len(context.history_question)} 字符")
 
                     # 2.7. 语义仲裁：检测「子集过滤」与「全量分布」冲突，获取应丢弃的槽位
                     history_question = None

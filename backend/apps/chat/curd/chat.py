@@ -3,7 +3,7 @@ from typing import Any, List
 
 import orjson
 import sqlparse
-from sqlalchemy import and_, select, update, insert
+from sqlalchemy import and_, select, update, insert, delete
 from sqlalchemy.exc import SQLAlchemyError
 
 from apps.chat.models.chat_model import Chat, ChatRecord, CreateChat, ChatInfo, RenameChat, ChatQuestion, ChatLog, \
@@ -76,7 +76,7 @@ def delete_chat(session, chart_id, current_user: CurrentUser) -> str:
     chat = session.query(Chat).filter(Chat.id == chart_id).first()
     if not chat:
         return f'Chat with id {chart_id} has been deleted'
-    
+
     # 检查权限：只有创建者才能删除
     if chat.create_by != current_user.id:
         raise Exception(f"Permission denied: You don't have permission to delete this chat")
@@ -85,6 +85,42 @@ def delete_chat(session, chart_id, current_user: CurrentUser) -> str:
     session.commit()
 
     return f'Chat with id {chart_id} has been deleted'
+
+
+def batch_delete_chats(session: SessionDep, chat_ids: list[int], current_user: CurrentUser) -> int:
+    if not chat_ids:
+        return 0
+
+    oid = current_user.oid if current_user.oid is not None else 1
+
+    # 只删除当前用户拥有的对话
+    chat_rows = session.execute(
+        select(Chat.id).where(
+            and_(Chat.id.in_(chat_ids), Chat.create_by == current_user.id, Chat.oid == oid)
+        )
+    ).scalars().all()
+    matched_ids = list(chat_rows)
+    if not matched_ids:
+        return 0
+
+    # 收集关联的 record IDs
+    record_rows = session.execute(
+        select(ChatRecord.id).where(ChatRecord.chat_id.in_(matched_ids))
+    ).scalars().all()
+    record_ids = list(record_rows)
+
+    # 按依赖顺序级联删除
+    if record_ids:
+        session.execute(delete(ErrorQueryRecord).where(ErrorQueryRecord.record_id.in_(record_ids)))
+        session.execute(delete(ChatLog).where(ChatLog.pid.in_(record_ids)))
+        session.execute(delete(ChatExecutionTrace).where(ChatExecutionTrace.record_id.in_(record_ids)))
+
+    session.execute(delete(ChatRecord).where(ChatRecord.chat_id.in_(matched_ids)))
+    session.execute(delete(ChatExecutionTrace).where(ChatExecutionTrace.chat_id.in_(matched_ids)))
+    session.execute(delete(Chat).where(Chat.id.in_(matched_ids)))
+
+    session.commit()
+    return len(matched_ids)
 
 
 def get_chart_config(session: SessionDep, chart_record_id: int, current_user: CurrentUser):

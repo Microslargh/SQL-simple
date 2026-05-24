@@ -681,6 +681,11 @@ class LLMService:
             )
 
             # 选表优先走 raw_http（有明确 timeout），避免 LangChain client 重试导致长时间阻塞
+            # 记录完整 LLM 选表提示词供执行轨迹展示
+            self._llm_table_selector_full_prompt = {
+                "system": system_prompt + " 不要输出解释，只输出纯JSON。",
+                "user": user_prompt,
+            }
             _async_log_util.info("[LLM选表] 调用模型（structured）")
             raw = self._invoke_openai_compatible_raw(
                 messages=[
@@ -3830,6 +3835,7 @@ class LLMService:
                         "datasource_id": self.ds.id if self.ds else None,
                         "schema_length": len(self.chat_question.db_schema or ""),
                         "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
+                        "llm_table_selector_prompt": getattr(self, '_llm_table_selector_full_prompt', None),
                     }
                 )
             else:
@@ -3851,6 +3857,7 @@ class LLMService:
                             "schema_length": len(self.chat_question.db_schema or ""),
                             "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
                             "source": "realtime_fallback_from_empty_preloaded",
+                            "llm_table_selector_prompt": getattr(self, '_llm_table_selector_full_prompt', None),
                         }
                     )
                 else:
@@ -3866,6 +3873,7 @@ class LLMService:
                             "schema_length": len(self.chat_question.db_schema or ""),
                             "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
                             "source": "preloaded",
+                            "llm_table_selector_prompt": getattr(self, '_llm_table_selector_full_prompt', None),
                         }
                     )
 

@@ -15,11 +15,15 @@ const props = withDefaults(
     currentChatId?: number
     chatList: Array<Chat>
     loading?: boolean
+    batchMode?: boolean
+    selectedIds?: Set<number>
   }>(),
   {
     currentChatId: undefined,
     chatList: () => [],
     loading: false,
+    batchMode: false,
+    selectedIds: () => new Set(),
   }
 )
 
@@ -88,7 +92,7 @@ const computedChatList = computed(() => {
   return _list
 })
 
-const emits = defineEmits(['chatSelected', 'chatRenamed', 'chatDeleted', 'update:loading'])
+const emits = defineEmits(['chatSelected', 'chatRenamed', 'chatDeleted', 'update:loading', 'selectionChanged'])
 
 const _loading = computed({
   get() {
@@ -100,7 +104,44 @@ const _loading = computed({
 })
 
 function onClickHistory(chat: Chat) {
+  if (props.batchMode) {
+    toggleChatSelection(chat.id!)
+    return
+  }
   emits('chatSelected', chat)
+}
+
+function toggleChatSelection(chatId: number) {
+  const newSelected = new Set(props.selectedIds)
+  if (newSelected.has(chatId)) {
+    newSelected.delete(chatId)
+  } else {
+    newSelected.add(chatId)
+  }
+  emits('selectionChanged', newSelected)
+}
+
+function toggleGroupSelection(groupChats: Array<Chat>) {
+  const newSelected = new Set(props.selectedIds)
+  const groupIds = groupChats.map(c => c.id!).filter(id => id !== undefined)
+  const allSelected = groupIds.every(id => newSelected.has(id))
+  if (allSelected) {
+    groupIds.forEach(id => newSelected.delete(id))
+  } else {
+    groupIds.forEach(id => newSelected.add(id))
+  }
+  emits('selectionChanged', newSelected)
+}
+
+function isGroupSelected(groupChats: Array<Chat>): boolean {
+  const groupIds = groupChats.map(c => c.id!).filter(id => id !== undefined)
+  return groupIds.length > 0 && groupIds.every(id => props.selectedIds.has(id))
+}
+
+function isGroupIndeterminate(groupChats: Array<Chat>): boolean {
+  const groupIds = groupChats.map(c => c.id!).filter(id => id !== undefined)
+  const selected = groupIds.filter(id => props.selectedIds.has(id))
+  return selected.length > 0 && selected.length < groupIds.length
 }
 
 function handleCommand(command: string | number | object, chat: Chat) {
@@ -207,6 +248,15 @@ const handleConfirmPassword = () => {
           style="cursor: pointer"
           @click="expandMap[group.key] = !expandMap[group.key]"
         >
+          <el-checkbox
+            v-if="batchMode"
+            :model-value="isGroupSelected(group.list)"
+            :indeterminate="isGroupIndeterminate(group.list)"
+            size="small"
+            @click.stop
+            @change="toggleGroupSelection(group.list)"
+            style="margin-right: 4px"
+          />
           <el-icon :class="!expandMap[group.key] && 'expand'" style="margin-right: 8px" size="10">
             <icon_expand_down_filled></icon_expand_down_filled>
           </el-icon>
@@ -215,11 +265,19 @@ const handleConfirmPassword = () => {
         <template v-for="chat in group.list" :key="chat.id">
           <div
             class="chat-list-item"
-            :class="{ active: currentChatId === chat.id, hide: !expandMap[group.key] }"
+            :class="{ active: currentChatId === chat.id && !batchMode, hide: !expandMap[group.key] }"
             @click="onClickHistory(chat)"
           >
+            <el-checkbox
+              v-if="batchMode"
+              :model-value="selectedIds.has(chat.id!)"
+              size="small"
+              @click.stop
+              @change="toggleChatSelection(chat.id!)"
+              style="margin-right: 6px"
+            />
             <span class="title">{{ chat.brief ?? 'Untitled' }}</span>
-            <el-popover :teleported="false" popper-class="popover-card" placement="bottom">
+            <el-popover v-if="!batchMode" :teleported="false" popper-class="popover-card" placement="bottom">
               <template #reference>
                 <el-icon
                   class="more"

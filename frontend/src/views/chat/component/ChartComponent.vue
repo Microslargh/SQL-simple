@@ -66,7 +66,7 @@ function renderChart() {
     const tableOptions =
       params.type === 'table'
         ? { 
-            showSummaryRow: !isCompositionQuestion(params.question) && !isSingleRowMultiColumn(params.data, axis.value),
+            showSummaryRow: !isCompositionQuestion(params.question) && !isSingleRowMultiColumn(params.data, axis.value) && params.data.length > 1,
             transpose: isSingleRowMultiColumn(params.data, axis.value)
           }
         : undefined

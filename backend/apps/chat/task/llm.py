@@ -812,10 +812,12 @@ class LLMService:
 
         if self.out_ds_instance:
             _async_log_util.info("[表结构获取] 使用外部数据源 schema（out_ds_instance）")
+            self._llm_selected_tables = []
             return self.out_ds_instance.get_db_schema(self.ds.id)
 
         if getattr(settings, "TABLE_SELECTOR_LLM_ENABLED", False):
             selected_tables = self._select_tables_by_llm(question or "")
+            self._llm_selected_tables = selected_tables  # 记录选表结果供执行轨迹使用
             if selected_tables:
                 schema = get_table_schema_for_tables(
                     session=self.session,
@@ -833,6 +835,7 @@ class LLMService:
             _async_log_util.warning("[LLM选表] 未选中有效表，回退默认表结构检索")
         else:
             _async_log_util.info("[表结构获取] TABLE_SELECTOR_LLM_ENABLED=False，跳过 LLM 选表")
+            self._llm_selected_tables = []
 
         return get_table_schema(
             session=self.session,
@@ -3836,6 +3839,7 @@ class LLMService:
                         "schema_length": len(self.chat_question.db_schema or ""),
                         "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
                         "llm_table_selector_prompt": getattr(self, '_llm_table_selector_full_prompt', None),
+                        "llm_selected_tables": getattr(self, '_llm_selected_tables', None),
                     }
                 )
             else:
@@ -3858,6 +3862,7 @@ class LLMService:
                             "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
                             "source": "realtime_fallback_from_empty_preloaded",
                             "llm_table_selector_prompt": getattr(self, '_llm_table_selector_full_prompt', None),
+                            "llm_selected_tables": getattr(self, '_llm_selected_tables', None),
                         }
                     )
                 else:
@@ -3874,6 +3879,7 @@ class LLMService:
                             "table_embedding_enabled": settings.TABLE_EMBEDDING_ENABLED,
                             "source": "preloaded",
                             "llm_table_selector_prompt": getattr(self, '_llm_table_selector_full_prompt', None),
+                            "llm_selected_tables": getattr(self, '_llm_selected_tables', None),
                         }
                     )
 

@@ -9,19 +9,14 @@ from fastapi.responses import StreamingResponse
 # from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import ValidationError
-from sqlmodel import select
 from starlette.responses import JSONResponse
 from common.utils.utils import SQLBotLogUtil
 from apps.chat.api.chat import create_chat
 from apps.chat.models.chat_model import ChatMcp, CreateChat, ChatStart, McpQuestion, McpAssistant, ChatQuestion, \
     ChatFinishStep
 from apps.chat.task.llm import LLMService
-from apps.system.crud.user import authenticate
-from apps.system.crud.user import get_db_user
-from apps.system.models.system_model import UserWsModel
-from apps.system.models.user import UserModel
+from apps.system.crud.user import authenticate, get_user_info
 from apps.system.schemas.system_schema import BaseUserDTO, AssistantHeader
-from apps.system.schemas.system_schema import UserInfoDTO
 from common.core import security
 from common.core.config import settings
 from common.core.deps import SessionDep
@@ -89,18 +84,7 @@ async def mcp_question(session: SessionDep, chat: McpQuestion):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Could not validate credentials",
         )
-    # session_user = await get_user_info(session=session, user_id=token_data.id)
-
-    db_user: UserModel = get_db_user(session=session, user_id=token_data.id)
-    session_user = UserInfoDTO.model_validate(db_user.model_dump())
-    session_user.isAdmin = session_user.id == 1 and session_user.account == 'admin'
-    if session_user.isAdmin:
-        session_user = session_user
-    ws_model: UserWsModel = session.exec(
-        select(UserWsModel).where(UserWsModel.uid == session_user.id, UserWsModel.oid == session_user.oid)).first()
-    session_user.weight = ws_model.weight if ws_model else -1
-
-    session_user = UserInfoDTO.model_validate(session_user)
+    session_user = await get_user_info(session=session, user_id=token_data.id)
     if not session_user:
         raise HTTPException(status_code=404, detail="User not found")
 

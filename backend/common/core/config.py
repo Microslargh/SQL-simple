@@ -124,6 +124,8 @@ class Settings(BaseSettings):
     # 直接登录配置
     AUTO_LOGIN_ENABLED: bool = False  # 是否启用直接登录模式（默认关闭）
 
+    EMBEDDED_TOKEN_VERIFY_ENABLED: bool = True  # 是否启用嵌入式Token签名校验（默认启用）
+
     TABLE_EMBEDDING_ENABLED: bool = Field(default=False, description="是否启用表结构的embedding检索筛选")
     TABLE_EMBEDDING_COUNT: int = Field(default=10, description="表embedding检索返回的最大表数量")
     # 上下文仲裁者（多轮对话意图冲突检测，解决「子集过滤」与「全量分布」冲突）

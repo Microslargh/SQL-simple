@@ -152,45 +152,80 @@ class TokenMiddleware(BaseHTTPMiddleware):
             return False, e
     
     async def validateEmbedded(self, param: str, trans: I18n) -> tuple[any]:
-        try: 
-            """ payload = jwt.decode(
-                param, settings.SECRET_KEY, algorithms=[security.ALGORITHM]
-            ) """
-            payload: dict = jwt.decode(
-                param,
-                options={"verify_signature": False, "verify_exp": False},
-                algorithms=[security.ALGORITHM]
-            )
-            app_key = payload.get('appId', '')
-            embeddedId = payload.get('embeddedId', None)
+        try:
+            # Step 1: Decode without verification to extract app_key and embeddedId
+            # (needed to look up the assistant's signing key)
+            try:
+                unverified_payload: dict = jwt.decode(
+                    param,
+                    options={"verify_signature": False, "verify_exp": False},
+                    algorithms=[security.ALGORITHM]
+                )
+            except Exception:
+                return False, "Invalid embedded token format"
+
+            app_key = unverified_payload.get('appId', '')
+            embeddedId = unverified_payload.get('embeddedId', None)
             if not embeddedId:
                 embeddedId = xor_decrypt(app_key)
-            if not payload['account']:
-                return False, f"Miss account payload error!"
-            account = payload['account']
+            if not unverified_payload.get('account'):
+                return False, "Miss account payload error!"
+
+            # Look up the assistant to get its signing key
             with Session(engine) as session:
-                """ session_user = await get_user_info(session = session, user_id = token_data.id)
-                session_user = UserInfoDTO.model_validate(session_user) """
-                session_user = get_user_by_account(session = session, account=account)
+                assistant_info = await get_assistant_info(session=session, assistant_id=embeddedId)
+                if not assistant_info:
+                    return False, "Invalid assistant"
+                assistant_info = AssistantModel.model_validate(assistant_info)
+
+                # Determine signing key: prefer assistant.unique, fall back to SECRET_KEY
+                signing_key = assistant_info.app_secret if assistant_info.app_secret else settings.SECRET_KEY
+
+                # Step 2: Re-decode with signature verification
+                if settings.EMBEDDED_TOKEN_VERIFY_ENABLED:
+                    try:
+                        payload: dict = jwt.decode(
+                            param,
+                            signing_key,
+                            algorithms=[security.ALGORITHM]
+                        )
+                    except jwt.InvalidSignatureError:
+                        SQLBotLogUtil.error(
+                            f"Embedded token signature verification failed for assistant {embeddedId}"
+                        )
+                        return False, "Embedded token signature invalid"
+                    except jwt.ExpiredSignatureError:
+                        SQLBotLogUtil.error(
+                            f"Embedded token expired for assistant {embeddedId}"
+                        )
+                        return False, "Embedded token expired"
+                else:
+                    # Transitional mode: trust unsigned payload but log warning
+                    SQLBotLogUtil.warning(
+                        f"EMBEDDED_TOKEN_VERIFY_ENABLED=False, "
+                        f"accepting unsigned embedded token for assistant {embeddedId}. "
+                        f"Consider enabling signature verification."
+                    )
+                    payload = unverified_payload
+
+                account = payload['account']
+                session_user = get_user_by_account(session=session, account=account)
                 if not session_user:
-                    message = trans('i18n_not_exist', msg = trans('i18n_user.account'))
+                    message = trans('i18n_not_exist', msg=trans('i18n_user.account'))
                     raise Exception(message)
-                session_user = await get_user_info(session = session, user_id = session_user.id)
-                
+                session_user = await get_user_info(session=session, user_id=session_user.id)
+
                 session_user = UserInfoDTO.model_validate(session_user)
                 if session_user.status != 1:
-                    message = trans('i18n_login.user_disable', msg = trans('i18n_concat_admin'))
+                    message = trans('i18n_login.user_disable', msg=trans('i18n_concat_admin'))
                     raise Exception(message)
                 if not session_user.oid or session_user.oid == 0:
-                    message = trans('i18n_login.no_associated_ws', msg = trans('i18n_concat_admin'))
+                    message = trans('i18n_login.no_associated_ws', msg=trans('i18n_concat_admin'))
                     raise Exception(message)
-                assistant_info = await get_assistant_info(session=session, assistant_id=embeddedId)
-                assistant_info = AssistantModel.model_validate(assistant_info)
                 assistant_info = AssistantHeader.model_validate(assistant_info.model_dump(exclude_unset=True))
                 return True, session_user, assistant_info
         except Exception as e:
             SQLBotLogUtil.exception(f"Embedded validation error: {str(e)}")
-            # Return False and the exception message
             return False, e
     
 def xor_decrypt(encrypted_str: str, key: int = 0xABCD1234) -> int:

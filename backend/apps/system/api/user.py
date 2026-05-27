@@ -109,7 +109,9 @@ async def ws_change(session: SessionDep, current_user: CurrentUser, trans:Trans,
     session.commit()
 
 @router.get("/{id}", response_model=UserEditor)
-async def query(session: SessionDep, trans: Trans, id: int) -> UserEditor:
+async def query(session: SessionDep, current_user: CurrentUser, trans: Trans, id: int) -> UserEditor:
+    if not current_user.isAdmin and current_user.id != id:
+        raise Exception(trans('i18n_permission.no_permission', url="", msg=trans('i18n_permission.only_admin')))
     db_user: UserModel = get_db_user(session = session, user_id = id)
     u_ws_options = await user_ws_options(session, id, trans)
     result = UserEditor.model_validate(db_user.model_dump())
@@ -150,7 +152,9 @@ async def create(session: SessionDep, creator: UserCreator, trans: Trans):
     
 @router.put("")
 @clear_cache(namespace=CacheNamespace.AUTH_INFO, cacheName=CacheName.USER_INFO, keyExpression="editor.id")
-async def update(session: SessionDep, editor: UserEditor, trans: Trans):
+async def update(session: SessionDep, current_user: CurrentUser, editor: UserEditor, trans: Trans):
+    if not current_user.isAdmin and current_user.id != editor.id:
+        raise Exception(trans('i18n_permission.no_permission', url="", msg=trans('i18n_permission.only_admin')))
     user_model: UserModel = get_db_user(session = session, user_id = editor.id)
     if not user_model:
         raise Exception(f"User with id [{editor.id}] not found!")
@@ -186,11 +190,15 @@ async def update(session: SessionDep, editor: UserEditor, trans: Trans):
     session.commit()
     
 @router.delete("/{id}")
-async def delete(session: SessionDep, id: int):
+async def delete(session: SessionDep, current_user: CurrentUser, trans: Trans, id: int):
+    if not current_user.isAdmin:
+        raise Exception(trans('i18n_permission.no_permission', url="", msg=trans('i18n_permission.only_admin')))
     await single_delete(session, id)
 
-@router.delete("")    
-async def batch_del(session: SessionDep, id_list: list[int]):
+@router.delete("")
+async def batch_del(session: SessionDep, current_user: CurrentUser, trans: Trans, id_list: list[int]):
+    if not current_user.isAdmin:
+        raise Exception(trans('i18n_permission.no_permission', url="", msg=trans('i18n_permission.only_admin')))
     for id in id_list:
         await single_delete(session, id)
     

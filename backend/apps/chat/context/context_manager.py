@@ -322,30 +322,41 @@ class ContextStateManager:
             try:
                 record = self.session.get(ChatRecord, latest_log.pid)
                 if record:
-                    # 提取历史用户问题
+                    # 提取历史用户问题：优先从 ChatRecord.question 取，其次从 messages 中提取 user-question 内容
                     history_question = None
-                    if latest_log.messages:
+                    if getattr(record, 'question', None) and (record.question or '').strip():
+                        history_question = (record.question or '').strip()
+                    if not history_question and latest_log.messages:
                         for msg in latest_log.messages:
                             if msg.get('type') == 'human':
                                 content = (msg.get('content') or '').strip()
-                                if content and not content.startswith('<context>') and not content.startswith('<time-range') and not content.startswith('<history'):
-                                    history_question = content
-                                    break
+                                if not content or content.startswith('<context>') or content.startswith('<time-range') or content.startswith('<history') or content.startswith('<background-infos>'):
+                                    continue
+                                # 尝试从 <user-question> 标签中提取文本
+                                uq_match = re.search(r'<user-question>\s*(.+?)\s*</user-question>', content, re.DOTALL)
+                                history_question = uq_match.group(1).strip() if uq_match else content
+                                break
                     if history_question:
                         context.history_question = history_question[:500]  # 截断，避免过长
                         _async_log_util.info(f"[上下文管理] 提取到历史问题，长度: {len(context.history_question)} 字符")
 
                     # 2.7. 语义仲裁：检测「子集过滤」与「全量分布」冲突，获取应丢弃的槽位
-                    history_question = None
-                    if latest_log.messages:
+                    history_question_for_arb = None
+                    if getattr(record, 'question', None) and (record.question or '').strip():
+                        history_question_for_arb = (record.question or '').strip()
+                    if not history_question_for_arb and latest_log.messages:
                         for msg in latest_log.messages:
                             if msg.get('type') == 'human':
-                                history_question = msg.get('content', '')
+                                content = (msg.get('content') or '').strip()
+                                if not content or content.startswith('<context>') or content.startswith('<background-infos>'):
+                                    continue
+                                uq_match = re.search(r'<user-question>\s*(.+?)\s*</user-question>', content, re.DOTALL)
+                                history_question_for_arb = uq_match.group(1).strip() if uq_match else content
                                 break
-                    if history_question and current_question:
+                    if history_question_for_arb and current_question:
                         discarded = get_slots_to_discard_hint(
                             current_question=current_question,
-                            history_question=history_question,
+                            history_question=history_question_for_arb,
                             history_sql=record.sql.strip(),
                         )
                         if discarded:

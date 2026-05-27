@@ -373,6 +373,13 @@ export class Table extends BaseChart {
           description: 'No Data',
         },
       },
+      style: {
+        colCell: {
+          widthByField: {
+            __index__: 60,
+          },
+        },
+      },
       dataCell: (viewMeta: any, spreadsheet: any) =>
         new AlignTableDataCell(viewMeta, spreadsheet),
     }

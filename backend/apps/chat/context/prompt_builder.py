@@ -9,92 +9,22 @@ class ContextPromptBuilder:
     """构建精简、结构化的上下文提示"""
     
     def build(self, context: StructuredContext, current_question: Optional[str] = None) -> Optional[str]:
-        """构建上下文提示字符串
+        """构建上下文提示字符串，只输出历史用户问题供追问场景参考。
 
         Args:
             context: 结构化上下文信息
-            current_question: 当前用户问题（用于判断是否需要显式时间继承指令）
+            current_question: 当前用户问题（保留参数兼容性，当前未使用）
 
         Returns:
-            格式化的上下文提示字符串，如果无内容则返回None
+            格式化的上下文提示字符串，如果无历史问题则返回None
         """
-        if not context.has_content():
+        if not context.history_question:
             return None
-        
-        parts = []
-        
-        # 实体引用
-        if context.entity_references:
-            for entity_type, entities in context.entity_references.items():
-                if entities:
-                    # 限制实体数量，避免过长
-                    display_entities = entities[:20]  # 最多显示20个
-                    entity_str = ", ".join(display_entities)
-                    if len(entities) > 20:
-                        entity_str += f" (共{len(entities)}个)"
-                    
-                    type_names = {
-                        'company': '公司',
-                        'city': '城市',
-                        'province': '省份',
-                        'country': '国家',
-                        'time': '时间',
-                    }
-                    type_name = type_names.get(entity_type, entity_type)
-                    parts.append(f'<entity-ref type="{entity_type}">{entity_str}</entity-ref>')
-        
-        # SQL模式
-        if context.sql_pattern:
-            # 限制SQL模式长度
-            sql_pattern = context.sql_pattern[:200] + "..." if len(context.sql_pattern) > 200 else context.sql_pattern
-            parts.append(f'<sql-pattern>{sql_pattern}</sql-pattern>')
-        
-        # 意图摘要
-        if context.intent_summary:
-            parts.append(f'<intent>{context.intent_summary}</intent>')
-        
-        # 相关数据摘要（精简版）
-        if context.relevant_data_summary:
-            # 限制数据摘要长度
-            data_summary = context.relevant_data_summary[:300] + "..." if len(context.relevant_data_summary) > 300 else context.relevant_data_summary
-            parts.append(f'<data-summary>{data_summary}</data-summary>')
-        
-        # 时间范围
-        if context.time_range:
-            time_format = context.time_range.get('format', 'YYYYMM')
-            if 'start' in context.time_range and 'end' in context.time_range:
-                start = context.time_range['start']
-                end = context.time_range['end']
-                # Use human-readable display if available
-                display = context.time_range.get('display', f"{start} 至 {end}")
-                time_str = display
-                parts.append(f'<time-range start="{start}" end="{end}" format="{time_format}">{time_str}</time-range>')
-            elif 'time' in context.time_range:
-                time_value = context.time_range['time']
-                display = context.time_range.get('display', str(time_value))
-                time_str = display
-                parts.append(f'<time-range time="{time_value}" format="{time_format}">{time_str}</time-range>')
-        
-        # 历史用户问题（用于追问场景，帮助 LLM 理解上下文意图）
-        if context.history_question:
-            question_text = context.history_question
-            if len(question_text) > 300:
-                question_text = question_text[:300] + "..."
-            parts.append(f'<history-question>{question_text}</history-question>')
 
-        # When time_range exists and current question lacks time info, inject explicit instruction
-        if context.time_range and current_question:
-            time_keywords = ['年', '月', '日', '时间', '日期', '期', '本月', '本年', '今年', '去年', '前年', '明年']
-            has_time = any(kw in current_question for kw in time_keywords)
-            if not has_time:
-                display = context.time_range.get('display', '')
-                if display:
-                    parts.append(f'<time-hint>注意：历史查询的时间范围为 {display}，当前问题未指定时间，请默认使用该时间范围。</time-hint>')
+        question_text = context.history_question
+        if len(question_text) > 300:
+            question_text = question_text[:300] + "..."
 
-        if not parts:
-            return None
-        
-        # 组合成结构化格式
-        context_prompt = "\n".join(parts)
+        context_prompt = f"<user-history-question>{question_text}</user-history-question>"
         _async_log_util.info(f"[上下文构建] 构建上下文提示，长度: {len(context_prompt)} 字符")
         return context_prompt

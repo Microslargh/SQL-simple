@@ -57,7 +57,16 @@ export class Table extends BaseChart {
     this.container = document.getElementById(id)
 
     this.debounceRender = debounce(async (width?: number) => {
-      if (this.table) {
+      if (this.table && width) {
+        const INDEX_COL_WIDTH = 60
+        const otherFields = (this.axis ?? []).filter((a) => a.value !== '__index__')
+        const otherColWidth =
+          otherFields.length > 0 ? Math.max(100, (width - INDEX_COL_WIDTH) / otherFields.length) : 0
+        const widthByField: Record<string, number> = { __index__: INDEX_COL_WIDTH }
+        for (const col of otherFields) {
+          widthByField[col.value] = otherColWidth
+        }
+        this.table.setOptions({ width, style: { colCell: { widthByField } } })
         this.table.changeSheetSize(width, this.tableHeight)
         await this.table.render(false)
       }
@@ -363,8 +372,23 @@ export class Table extends BaseChart {
     const tableContentHeight = TABLE_HEADER_HEIGHT + processedData.length * TABLE_ROW_HEIGHT
     this.tableHeight = Math.min(TABLE_MAX_HEIGHT, Math.max(tableContentHeight, TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT))
 
+    const containerWidth =
+      this.container instanceof HTMLElement
+        ? this.container.parentElement?.clientWidth || this.container.clientWidth
+        : 600
+
+    const INDEX_COL_WIDTH = 60
+    const otherFields = (this.axis ?? []).filter((a) => a.value !== '__index__')
+    const otherColWidth =
+      otherFields.length > 0 ? Math.max(100, (containerWidth - INDEX_COL_WIDTH) / otherFields.length) : 0
+
+    const widthByField: Record<string, number> = { __index__: INDEX_COL_WIDTH }
+    for (const col of otherFields) {
+      widthByField[col.value] = otherColWidth
+    }
+
     const s2Options: S2Options = {
-      width: (this.container instanceof HTMLElement ? this.container.clientWidth : null) || 600,
+      width: containerWidth,
       height: this.tableHeight,
       placeholder: {
         cell: '-',
@@ -375,9 +399,7 @@ export class Table extends BaseChart {
       },
       style: {
         colCell: {
-          widthByField: {
-            __index__: 60,
-          },
+          widthByField,
         },
       },
       dataCell: (viewMeta: any, spreadsheet: any) =>

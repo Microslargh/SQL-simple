@@ -364,7 +364,7 @@ export class Table extends BaseChart {
     this.tableHeight = Math.min(TABLE_MAX_HEIGHT, Math.max(tableContentHeight, TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT))
 
     const s2Options: S2Options = {
-      width: 600,
+      width: (this.container instanceof HTMLElement ? this.container.clientWidth : null) || 600,
       height: this.tableHeight,
       placeholder: {
         cell: '-',

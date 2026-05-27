@@ -30,22 +30,24 @@ const props = withDefaults(
 const { t } = useI18n()
 
 function groupByDate(chat: Chat) {
-  const todayStart = dayjs(dayjs().format('YYYY-MM-DD') + ' 00:00:00').toDate()
-  const todayEnd = dayjs(dayjs().format('YYYY-MM-DD') + ' 23:59:59').toDate()
-  const weekStart = dayjs(dayjs().subtract(7, 'day').format('YYYY-MM-DD') + ' 00:00:00').toDate()
-
+  const now = dayjs()
   const time = getDate(chat.create_time)
 
   if (time) {
-    if (time >= todayStart && time <= todayEnd) {
-      return t('qa.today')
+    const hourAgo = now.subtract(1, 'hour').toDate()
+    const dayAgo = now.subtract(24, 'hour').toDate()
+    const weekAgo = now.subtract(168, 'hour').toDate()
+
+    if (time >= hourAgo) {
+      return t('qa.group_last_hour')
     }
-    if (time < todayStart && time >= weekStart) {
-      return t('qa.week')
+    if (time >= dayAgo) {
+      return t('qa.group_last_day')
     }
-    if (time < weekStart) {
-      return t('qa.earlier')
+    if (time >= weekAgo) {
+      return t('qa.group_last_week')
     }
+    return t('qa.group_earlier')
   }
 
   return t('qa.no_time')
@@ -56,30 +58,37 @@ const computedChatGroup = computed(() => {
 })
 
 const expandMap = ref({
-  [t('qa.today')]: true,
-  [t('qa.week')]: true,
-  [t('qa.earlier')]: true,
+  [t('qa.group_last_hour')]: true,
+  [t('qa.group_last_day')]: true,
+  [t('qa.group_last_week')]: true,
+  [t('qa.group_earlier')]: true,
   [t('qa.no_time')]: true,
 })
 
 const computedChatList = computed(() => {
   const _list = []
-  if (computedChatGroup.value[t('qa.today')]) {
+  if (computedChatGroup.value[t('qa.group_last_hour')]) {
     _list.push({
-      key: t('qa.today'),
-      list: computedChatGroup.value[t('qa.today')],
+      key: t('qa.group_last_hour'),
+      list: computedChatGroup.value[t('qa.group_last_hour')],
     })
   }
-  if (computedChatGroup.value[t('qa.week')]) {
+  if (computedChatGroup.value[t('qa.group_last_day')]) {
     _list.push({
-      key: t('qa.week'),
-      list: computedChatGroup.value[t('qa.week')],
+      key: t('qa.group_last_day'),
+      list: computedChatGroup.value[t('qa.group_last_day')],
     })
   }
-  if (computedChatGroup.value[t('qa.earlier')]) {
+  if (computedChatGroup.value[t('qa.group_last_week')]) {
     _list.push({
-      key: t('qa.earlier'),
-      list: computedChatGroup.value[t('qa.earlier')],
+      key: t('qa.group_last_week'),
+      list: computedChatGroup.value[t('qa.group_last_week')],
+    })
+  }
+  if (computedChatGroup.value[t('qa.group_earlier')]) {
+    _list.push({
+      key: t('qa.group_earlier'),
+      list: computedChatGroup.value[t('qa.group_earlier')],
     })
   }
   if (computedChatGroup.value[t('qa.no_time')]) {

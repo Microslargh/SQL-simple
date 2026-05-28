@@ -123,22 +123,14 @@ const updateStepStatus = (
   result?: any
 ) => {
   const existingStep = processSteps.value.get(step)
-  if (existingStep) {
-    existingStep.status = status
-    // 如果提供了新的description，则更新；如果状态变为completed但没有description，保持原有description
-    if (description !== undefined) {
-      existingStep.description = description
-    }
-    if (result !== undefined) existingStep.result = result
-  } else {
-    processSteps.value.set(step, {
-      step,
-      stepName,
-      status,
-      description: description || '',
-      result,
-    })
-  }
+  // 始终通过 Map.set() 替换为新对象，确保 Map 响应式被触发
+  processSteps.value.set(step, {
+    step,
+    stepName,
+    status,
+    description: description !== undefined ? description : (existingStep?.description || ''),
+    result: result !== undefined ? result : existingStep?.result,
+  })
 }
 
 const sendMessage = async () => {
@@ -292,6 +284,8 @@ const sendMessage = async () => {
                 break
             }
             await nextTick()
+            // 让出浏览器渲染管道，确保视觉上逐步呈现
+            await new Promise((resolve) => setTimeout(resolve, 0))
           }
         }
       }

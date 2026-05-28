@@ -866,7 +866,7 @@ const defaultFloatPopoverStyle = ref({
   border: '1px solid rgba(222, 224, 227, 1)',
   borderRadius: '6px',
 })
-let Question:boolean=true
+const Question = ref<boolean>(true)
 const isCompletePage = computed(() => !assistantStore.getAssistant || assistantStore.getEmbedded)
 const embeddedHistoryHidden = computed(
   () => assistantStore.getAssistant && !assistantStore.getHistory
@@ -987,7 +987,7 @@ const handleScroll = (val: any) => {
 }
 
 const createNewChatSimple = async () => {
-  Question=true
+  Question.value = true
  await getChatList(jumpCreatChat)
   currentChat.value = new ChatInfo()
   currentChatId.value = undefined
@@ -1047,7 +1047,7 @@ function getChatList(callback?: () => void) {
 }
 
 function onClickHistory(chat: ChatInfo) {
-  Question=false
+  Question.value = false
   scrollToBottom()
   forEach(chat?.records, (record: ChatRecord) => {
     // getChatData(record.id)

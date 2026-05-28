@@ -137,13 +137,13 @@ async function getRecommendQuestions() {
     emits('loadingOver')
   }
 }
-let  hotQuestionT:any=[]
+const hotQuestionList = ref<any[]>([])
 
 const hotQuestion = () => {
     hot_Question_Api.getMatch()
     .then((res: any) => {
-     hotQuestionT=  res.hotQuestions
-      console.log('[  hotQuestionT] >', hotQuestionT)
+     hotQuestionList.value = res.hotQuestions || []
+      console.log('[  hotQuestionList] >', hotQuestionList.value)
       // toggleRowLoading.value = true
       // fieldList.value = res.records
       // pageInfo.total = res.total
@@ -170,7 +170,7 @@ onBeforeUnmount(() => {
 defineExpose({ getRecommendQuestions, id: () => props.recordId, stop })
 </script>
  <template>
-  <div v-if="computedQuestions.length > 0 || loading" class="recommend-questions">
+  <div v-if="computedQuestions.length > 0 || loading || (firstChat && hotQuestionList.length > 0)" class="recommend-questions">
 
     <div v-if="firstChat" style="margin-bottom: 8px;text-align:center;">热门问题:</div>
     <div v-else class="continue-ask">{{ t('qa.continue_to_ask') }}</div>
@@ -180,7 +180,7 @@ defineExpose({ getRecommendQuestions, id: () => props.recordId, stop })
     <div  class="question-grid">
       <template v-if="firstChat">
         <div
-          v-for="(question, index) in hotQuestionT"
+          v-for="(question, index) in hotQuestionList"
           :key="index"
           class="question"
           :class="{ disabled: disabled }"

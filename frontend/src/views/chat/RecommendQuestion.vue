@@ -46,12 +46,12 @@ const computedQuestions = computed<string>(() => {
   }
   return []
 })
-let  hotQuestionT:any=[]
+const hotQuestionList = ref<any[]>([])
 
 const hotQuestion = () => {
     hot_Question_Api.getMatch()
     .then((res: any) => {
-     hotQuestionT=  res.hotQuestions
+     hotQuestionList.value = res.hotQuestions || []
       // toggleRowLoading.value = true
       // fieldList.value = res.records
       // pageInfo.total = res.total
@@ -171,7 +171,7 @@ defineExpose({ getRecommendQuestions, id: () => props.recordId, stop })
 </script>
 
 <template>
-  <div v-if="computedQuestions.length > 0 || loading" class="recommend-questions">
+  <div v-if="computedQuestions.length > 0 || loading || (firstChat && hotQuestionList.length > 0)" class="recommend-questions">
     <div v-if="firstChat" style="margin-bottom: 8px">热门问题:</div>
     <div v-else class="continue-ask">{{ t('qa.continue_to_ask') }}</div>
     <div v-if="loading">
@@ -180,7 +180,7 @@ defineExpose({ getRecommendQuestions, id: () => props.recordId, stop })
     <div class="question-grid">
       <template v-if="firstChat">
         <div
-          v-for="(question, index) in hotQuestionT"
+          v-for="(question, index) in hotQuestionList"
           :key="index"
           class="question"
           :class="{ disabled: disabled }"

@@ -109,12 +109,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div :id="chartId" class="chart-container"></div>
+  <div :id="chartId" class="chart-container" :class="{ 'chart-container--table': params.type === 'table' }"></div>
 </template>
 
 <style scoped lang="less">
 .chart-container {
   height: 100%;
   width: 100%;
+
+  &.chart-container--table {
+    height: auto;
+  }
 }
 </style>

@@ -10,6 +10,7 @@ const props = defineProps<{
   chartType: ChartTypes
   message: ChatMessage
   data: Array<{ [key: string]: any }>
+  question?: string
 }>()
 
 const { t } = useI18n()
@@ -93,6 +94,7 @@ defineExpose({
       :y="yAxis"
       :series="series"
       :data="data"
+      :question="question"
     />
     <el-empty v-else :description="t('chat.no_data')" />
   </div>

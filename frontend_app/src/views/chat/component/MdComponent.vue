@@ -25,6 +25,30 @@ const renderMd = computed(() => {
     display: block;
   }
 
+  // 移动端 Markdown 表格适配
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+    font-size: 12px;
+
+    th,
+    td {
+      padding: 6px 8px;
+    }
+
+    thead {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    tbody tr:nth-child(even) {
+      background-color: #fafafa;
+    }
+  }
+
   //ul {
   //  padding-left: 16px;
   //}

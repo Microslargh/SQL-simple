@@ -13,6 +13,7 @@ const params = withDefaults(
     x?: Array<ChartAxis>
     y?: Array<ChartAxis>
     series?: Array<ChartAxis>
+    question?: string
   }>(),
   {
     data: () => [],
@@ -20,6 +21,7 @@ const params = withDefaults(
     x: () => [],
     y: () => [],
     series: () => [],
+    question: '',
   }
 )
 
@@ -46,10 +48,20 @@ const axis = computed(() => {
 
 let chartInstance: BaseChart | undefined
 
+const tableOptions = computed(() => {
+  const q = params.question || ''
+  const hasCompositionKeywords = ['构成', '组成', '占比'].some((kw) => q.includes(kw))
+  const isSingleRow = params.data.length === 1 && axis.value.length >= 4
+  return {
+    showSummaryRow: !hasCompositionKeywords,
+    transpose: isSingleRow,
+  }
+})
+
 function renderChart() {
   chartInstance = getChartInstance(params.type, chartId.value)
   if (chartInstance) {
-    chartInstance.init(axis.value, params.data)
+    chartInstance.init(axis.value, params.data, tableOptions.value)
     chartInstance.render()
   }
   console.debug(chartInstance)

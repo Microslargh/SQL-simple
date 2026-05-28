@@ -125,17 +125,28 @@ const chartObject = computed<{
 const hasChartKeywords = computed(() => {
   const question = props.message?.record?.question || ''
   if (!question) return false
-  
+
   const chartKeywords = [
-    '柱状图', '柱图', 'column', 'bar chart',
-    '折线图', '折线', 'line', 'line chart',
-    '条形图', 'bar',
-    '饼图', 'pie', 'pie chart',
-    '图表', 'chart', '可视化'
+    '柱状图',
+    '柱图',
+    'column',
+    'bar chart',
+    '折线图',
+    '折线',
+    'line',
+    'line chart',
+    '条形图',
+    'bar',
+    '饼图',
+    'pie',
+    'pie chart',
+    '图表',
+    'chart',
+    '可视化',
   ]
-  
+
   const questionLower = String(question).toLowerCase()
-  return chartKeywords.some(keyword => questionLower.includes(keyword.toLowerCase()))
+  return chartKeywords.some((keyword) => questionLower.includes(keyword.toLowerCase()))
 })
 
 // 根据用户提问和图表类型决定默认显示类型
@@ -144,12 +155,12 @@ const defaultChartType = computed<ChartTypes>(() => {
   if (props.chatType && props.chatType !== 'table') {
     return props.chatType
   }
-  
+
   // 如果用户提问包含图表关键词，优先显示图表
   if (hasChartKeywords.value && chartObject.value?.type && chartObject.value.type !== 'table') {
     return chartObject.value.type
   }
-  
+
   // 默认显示表格
   return 'table'
 })
@@ -166,7 +177,7 @@ watch(
     if (props.chatType) {
       return
     }
-    
+
     // 如果用户提问包含图表关键词，且后端返回了图表类型（非table），优先使用图表类型
     if (hasKeywords && chartType && chartType !== 'table') {
       currentChartType.value = chartType
@@ -379,8 +390,8 @@ defineExpose({
 <template>
   <div
     v-if="
-      ((!isPredict && (message?.record?.sql || message?.record?.chart)) ||
-        (isPredict && message?.record?.chart && data.length > 0))
+      (!isPredict && (message?.record?.sql || message?.record?.chart)) ||
+      (isPredict && message?.record?.chart && data.length > 0)
     "
     v-loading.fullscreen.lock="loading"
     class="chart-component-container"
@@ -430,7 +441,7 @@ defineExpose({
             </el-button>
           </el-tooltip>
         </div>
-        <div v-if="message?.record?.chart" v-show="false">
+        <div v-if="message?.record?.chart">
           <el-popover
             ref="exportRef"
             trigger="click"
@@ -525,6 +536,7 @@ defineExpose({
           :chart-type="chartType"
           :message="message"
           :data="data"
+          :question="message?.record?.question"
         />
       </div>
       <div v-if="dataObject.limit" class="over-limit-hint">

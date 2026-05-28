@@ -1,6 +1,42 @@
 import { BaseChart, type ChartAxis, type ChartData } from '@/views/chat/component/BaseChart.ts'
-import { TableSheet, type S2Options, type S2DataConfig, type S2MountContainer } from '@antv/s2'
+import {
+  TableSheet,
+  TableDataCell,
+  type S2Options,
+  type S2DataConfig,
+  type S2MountContainer,
+} from '@antv/s2'
 import { debounce } from 'lodash-es'
+
+/** 自定义数据单元格：序号列居中，其余列文字居左、数字居右 */
+function isNumericValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return false
+  if (typeof value === 'number' && !Number.isNaN(value)) return true
+  const s = String(value).trim()
+  // 支持千分位（如 1,099）、百分号（如 3.74%）等格式，去掉逗号与末尾 % 后再判断
+  const normalized = s.replace(/,/g, '').replace(/%\s*$/, '')
+  if (/^-?\d+(\.\d+)?$/.test(normalized)) return true
+  return false
+}
+
+class AlignTableDataCell extends TableDataCell {
+  getTextStyle() {
+    const textStyle = super.getTextStyle()
+    const valueField = this.meta?.valueField
+    if (valueField === '__index__') {
+      return { ...textStyle, textAlign: 'center' as const }
+    }
+    const value = this.meta?.fieldValue
+    return {
+      ...textStyle,
+      textAlign: isNumericValue(value) ? ('right' as const) : ('left' as const),
+    }
+  }
+}
+
+const TABLE_HEADER_HEIGHT = 40
+const TABLE_ROW_HEIGHT = 32
+const TABLE_MAX_HEIGHT = 360
 
 export class Table extends BaseChart {
   table?: TableSheet = undefined
@@ -11,20 +47,32 @@ export class Table extends BaseChart {
 
   resizeObserver: ResizeObserver
 
+  /** 按内容计算出的表格高度，resize 时保持不随父容器拉高 */
+  private tableHeight: number = TABLE_MAX_HEIGHT
+
   constructor(id: string) {
     super(id, 'table')
     this.container = document.getElementById(id)
 
-    this.debounceRender = debounce(async (width?: number, height?: number) => {
-      if (this.table) {
-        this.table.changeSheetSize(width, height)
+    this.debounceRender = debounce(async (width?: number) => {
+      if (this.table && width) {
+        const INDEX_COL_WIDTH = 60
+        const otherFields = (this.axis ?? []).filter((a) => a.value !== '__index__')
+        const otherColWidth =
+          otherFields.length > 0 ? Math.max(100, (width - INDEX_COL_WIDTH) / otherFields.length) : 0
+        const widthByField: Record<string, number> = { __index__: INDEX_COL_WIDTH }
+        for (const col of otherFields) {
+          widthByField[col.value] = otherColWidth
+        }
+        this.table.setOptions({ width, style: { colCell: { widthByField } } })
+        this.table.changeSheetSize(width, this.tableHeight)
         await this.table.render(false)
       }
     }, 200)
 
     this.resizeObserver = new ResizeObserver(([entry] = []) => {
       const [size] = entry.borderBoxSize || []
-      this.debounceRender(size.inlineSize, size.blockSize)
+      this.debounceRender(size.inlineSize)
     })
 
     if (this.container?.parentElement) {
@@ -32,11 +80,50 @@ export class Table extends BaseChart {
     }
   }
 
+  // 判断是否为日期/年份格式（YYYY、YYYYMM、YYYYMMDD等）
+  private isDateOrYearFormat(value: any): boolean {
+    if (value === null || value === undefined || value === '') {
+      return false
+    }
+    const str = String(value).trim()
+    // 检查是否为4位、6位或8位纯数字（可能是年份格式）
+    if (/^\d{4}$/.test(str)) {
+      // 4位数字，可能是年份（如2024）
+      const year = parseInt(str, 10)
+      // 合理的年份范围：1900-2100
+      if (year >= 1900 && year <= 2100) {
+        return true
+      }
+    } else if (/^\d{6}$/.test(str)) {
+      // 6位数字，可能是YYYYMM格式（如202405）
+      const year = parseInt(str.substring(0, 4), 10)
+      const month = parseInt(str.substring(4, 6), 10)
+      if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12) {
+        return true
+      }
+    } else if (/^\d{8}$/.test(str)) {
+      // 8位数字，可能是YYYYMMDD格式（如20240501）
+      const year = parseInt(str.substring(0, 4), 10)
+      const month = parseInt(str.substring(4, 6), 10)
+      const day = parseInt(str.substring(6, 8), 10)
+      if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return true
+      }
+    }
+    return false
+  }
+
   // 格式化数字为千位分隔符
   private formatNumber(value: any): string {
     if (value === null || value === undefined || value === '') {
       return '-'
     }
+
+    // 如果是日期/年份格式，不进行数字格式化
+    if (this.isDateOrYearFormat(value)) {
+      return String(value)
+    }
+
     // 尝试转换为数字
     const num = Number(value)
     if (isNaN(num)) {
@@ -55,37 +142,201 @@ export class Table extends BaseChart {
     if (value === null || value === undefined || value === '') {
       return false
     }
+
+    // 如果是日期/年份格式，不视为数值类型
+    if (this.isDateOrYearFormat(value)) {
+      return false
+    }
+
     const num = Number(value)
     return !isNaN(num) && isFinite(num)
   }
 
-  // 计算汇总行数据
+  /**
+   * 判断列是否为「数值编码的分类列」，不应参与汇总求和。
+   * 如：注册状态 0/1、境内境外 0/1、与国有企业关系 1/2/3/4、合并标志 1/2 等。
+   */
+  private isNumericCodedCategoryColumn(col: ChartAxis, data: Array<ChartData>): boolean {
+    const values = data.map((row) => row[col.value]).filter((v) => this.isNumericField(v))
+    if (values.length === 0) return false
+
+    const uniqueCount = new Set(values.map((v) => String(Number(v)))).size
+    const colName = (col.name || col.value || '').toLowerCase()
+
+    // 列名包含类型/状态/标志/关系等，视为分类列
+    const categoryKeywords = [
+      '状态',
+      '标志',
+      '关系',
+      '境内',
+      '境外',
+      '合并',
+      '类型',
+      '注册',
+      '出资',
+    ]
+    if (categoryKeywords.some((kw) => colName.includes(kw.toLowerCase()))) {
+      return true
+    }
+
+    // 列名包含金额/税费/收入等，视为指标列，应参与汇总
+    const metricKeywords = [
+      '税费',
+      '金额',
+      '亿元',
+      '万元',
+      '收入',
+      '成本',
+      '利润',
+      '资产',
+      '负债',
+      '规模',
+      '元',
+    ]
+    if (metricKeywords.some((kw) => colName.includes(kw))) {
+      return false
+    }
+
+    // 唯一值数量在 2~15 之间，多为编码分类（0/1、1/2/3/4 等），不汇总
+    if (uniqueCount >= 2 && uniqueCount <= 15) {
+      return true
+    }
+
+    return false
+  }
+
+  // 计算汇总行数据（数值编码的分类列不参与求和）
   private calculateSummaryRow(axis: Array<ChartAxis>, data: Array<ChartData>): ChartData {
     const summaryRow: ChartData = {
       __index__: '汇总',
     }
-    
+
     axis.forEach((col) => {
-      const values = data.map(row => row[col.value]).filter(v => this.isNumericField(v))
-      
+      if (this.isNumericCodedCategoryColumn(col, data)) {
+        summaryRow[col.value] = '-'
+        return
+      }
+
+      const values = data.map((row) => row[col.value]).filter((v) => this.isNumericField(v))
+
       if (values.length > 0) {
-        // 计算数值字段的总和
         const sum = values.reduce((acc, val) => acc + Number(val), 0)
         summaryRow[col.value] = this.formatNumber(sum)
       } else {
-        // 非数值字段显示空或"汇总"
         summaryRow[col.value] = ''
       }
     })
-    
+
     return summaryRow
   }
 
-  // 处理数据：添加序号列、格式化数值和汇总行
-  private processData(axis: Array<ChartAxis>, data: Array<ChartData>): { processedAxis: Array<ChartAxis>, processedData: Array<ChartData> } {
+  /** 按所有数据列去重，保留首次出现的行 */
+  private deduplicateRows(axis: Array<ChartAxis>, data: Array<ChartData>): Array<ChartData> {
+    if (!data?.length || !axis?.length) return data ?? []
+    const seen = new Set<string>()
+    return data.filter((row) => {
+      const key = axis.map((a) => String(row[a.value] ?? '')).join('')
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  /**
+   * 将少行多列数据转置为多行多列（序号、指标名称、各行列值）。
+   *
+   * 关键设计：动态检测"行标识符列"——在原始列中找到一列，其每行取值互不相同且非空，
+   * 用这些值命名转置后的值列（如 "2024年"/"2025年"），同时跳过该标识符列以避免
+   * 在表格中重复展示。
+   */
+  private transposeSingleRowData(
+    axis: Array<ChartAxis>,
+    data: Array<ChartData>
+  ): { processedAxis: Array<ChartAxis>; processedData: Array<ChartData> } {
     if (!data || data.length === 0) {
       return { processedAxis: axis, processedData: [] }
     }
+
+    // 先对 axis 去重（后端可能下发重复列定义，导致转置后出现重复行）
+    const dedupedAxis = axis.filter(
+      (col, idx, arr) => arr.findIndex((c) => c.value === col.value) === idx
+    )
+
+    /** 在去重后的 axis 中查找最适合作为行标识符的列 */
+    const findIdentifierColumn = (): { colIndex: number; values: string[] } | null => {
+      if (data.length < 2) return null
+      for (let colIdx = 0; colIdx < dedupedAxis.length; colIdx++) {
+        const col = dedupedAxis[colIdx]
+        const values = data.map((row) => row[col.value])
+        if (!values.every((v) => v != null && String(v).trim() !== '')) continue
+        const strValues = values.map((v) => String(v))
+        if (new Set(strValues).size !== data.length) continue
+        // 优先非数值列（数值不适合做列标题）
+        const allNumeric = strValues.every((v) => this.isNumericField(v))
+        if (!allNumeric) return { colIndex: colIdx, values: strValues }
+      }
+      return null
+    }
+
+    const idColumn = findIdentifierColumn()
+
+    // 获取值列的显示名称
+    const getValueColumnName = (rowIndex: number): string => {
+      if (idColumn) return idColumn.values[rowIndex]
+      if (data.length === 1) return '值'
+      return `第${rowIndex + 1}行`
+    }
+
+    // 构建转置后的列：序号 + 指标名称 + N个值列
+    const transposedAxis: Array<ChartAxis> = [
+      { name: '序号', value: '__index__' },
+      { name: '指标名称', value: '__name__' },
+    ]
+    for (let i = 0; i < data.length; i++) {
+      transposedAxis.push({ name: getValueColumnName(i), value: `__value_${i}__` })
+    }
+
+    // 构建转置后的数据：每个去重后的原始列变为一行，跳过标识符列
+    const transposedData: Array<ChartData> = []
+    let index = 1
+
+    dedupedAxis.forEach((col, colIdx) => {
+      if (idColumn && colIdx === idColumn.colIndex) return
+
+      const row: ChartData = {
+        __index__: index++,
+        __name__: col.name || col.value,
+      }
+
+      data.forEach((rowData, rowIndex) => {
+        const value = rowData[col.value]
+        const formattedValue = this.isNumericField(value) ? this.formatNumber(value) : value
+        row[`__value_${rowIndex}__`] = formattedValue
+      })
+
+      transposedData.push(row)
+    })
+
+    return { processedAxis: transposedAxis, processedData: transposedData }
+  }
+
+  // 处理数据：按行去重后添加序号列、格式化数值，可选添加汇总行（构成类问题不汇总）
+  private processData(
+    axis: Array<ChartAxis>,
+    data: Array<ChartData>,
+    addSummaryRow: boolean = true,
+    transpose: boolean = false
+  ): { processedAxis: Array<ChartAxis>; processedData: Array<ChartData> } {
+    if (!data || data.length === 0) {
+      return { processedAxis: axis, processedData: [] }
+    }
+
+    // 如果是单行多列场景且需要转置，直接转置数据
+    if (transpose) {
+      return this.transposeSingleRowData(axis, data)
+    }
+
+    const dataToProcess = this.deduplicateRows(axis, data)
 
     // 添加序号列
     const indexAxis: ChartAxis = {
@@ -93,38 +344,42 @@ export class Table extends BaseChart {
       value: '__index__',
     }
     const processedAxis = [indexAxis, ...axis]
-    
-    // 处理数据：添加序号和格式化数值
-    const processedData = data.map((row, index) => {
+
+    // 处理数据：添加序号和格式化数值（汇总行基于去重后的数据计算）
+    const processedData = dataToProcess.map((row, index) => {
       const processedRow: ChartData = {
         __index__: index + 1,
       }
-      
-      // 复制原始数据并格式化数值
+
       axis.forEach((col) => {
         const value = row[col.value]
-        // 判断是否为数值类型
         if (this.isNumericField(value)) {
           processedRow[col.value] = this.formatNumber(value)
         } else {
           processedRow[col.value] = value
         }
       })
-      
+
       return processedRow
     })
-    
-    // 添加汇总行
-    const summaryRow = this.calculateSummaryRow(axis, data)
-    processedData.push(summaryRow)
-    
+
+    if (addSummaryRow) {
+      const summaryRow = this.calculateSummaryRow(axis, dataToProcess)
+      processedData.push(summaryRow)
+    }
+
     return { processedAxis, processedData }
   }
 
-  init(axis: Array<ChartAxis>, data: Array<ChartData>) {
-    // 处理数据：添加序号和格式化
-    const { processedAxis, processedData } = this.processData(axis, data)
-    
+  init(
+    axis: Array<ChartAxis>,
+    data: Array<ChartData>,
+    options?: { showSummaryRow?: boolean; transpose?: boolean }
+  ) {
+    const addSummaryRow = options?.showSummaryRow !== false
+    const transpose = options?.transpose === true
+    const { processedAxis, processedData } = this.processData(axis, data, addSummaryRow, transpose)
+
     super.init(processedAxis, processedData)
 
     const s2DataConfig: S2DataConfig = {
@@ -141,9 +396,32 @@ export class Table extends BaseChart {
       data: this.data,
     }
 
+    const tableContentHeight = TABLE_HEADER_HEIGHT + processedData.length * TABLE_ROW_HEIGHT
+    this.tableHeight = Math.min(
+      TABLE_MAX_HEIGHT,
+      Math.max(tableContentHeight, TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT)
+    )
+
+    const containerWidth =
+      this.container instanceof HTMLElement
+        ? this.container.parentElement?.clientWidth || this.container.clientWidth
+        : 600
+
+    const INDEX_COL_WIDTH = 60
+    const otherFields = (this.axis ?? []).filter((a) => a.value !== '__index__')
+    const otherColWidth =
+      otherFields.length > 0
+        ? Math.max(100, (containerWidth - INDEX_COL_WIDTH) / otherFields.length)
+        : 0
+
+    const widthByField: Record<string, number> = { __index__: INDEX_COL_WIDTH }
+    for (const col of otherFields) {
+      widthByField[col.value] = otherColWidth
+    }
+
     const s2Options: S2Options = {
-      width: 600,
-      height: 360,
+      width: containerWidth,
+      height: this.tableHeight,
       placeholder: {
         cell: '-',
         empty: {
@@ -151,10 +429,17 @@ export class Table extends BaseChart {
           description: 'No Data',
         },
       },
+      style: {
+        colCell: {
+          widthByField,
+        },
+      },
+      dataCell: (viewMeta: any, spreadsheet: any) => new AlignTableDataCell(viewMeta, spreadsheet),
     }
 
     if (this.container) {
       this.table = new TableSheet(this.container, s2DataConfig, s2Options)
+      ;(this.container as HTMLElement).style.height = `${this.tableHeight}px`
     }
   }
 

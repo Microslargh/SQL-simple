@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     GUESS_SCHEMA_INCLUDE_VALUE_HINTS: bool = Field(default=True, description="猜你想问 schema 是否注入深表字段值域示例")
     GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")
     GUESS_SQL_VALIDATE_ENABLED: bool = Field(default=False, description="是否启用猜你想问 SQL 预验证（会增加延迟）")
-    GUESS_RECOMMEND_ENABLED: bool = Field(default=True, description="是否启用猜你想问/推荐问题模块总开关")
+    GUESS_RECOMMEND_ENABLED: bool = Field(default=False, description="是否启用猜你想问/推荐问题模块总开关")
     USE_CUSTOM_COMMENT_ENABLED: bool = Field(default=False, description="是否在 schema 中使用自定义注释（开启则优先用 custom_comment，关闭则始终用数据库原始注释）")
     TABLE_SELECTOR_LLM_ENABLED: bool = Field(default=True, description="是否启用 SQL 前 LLM 选表节点")
     TABLE_SELECTOR_LLM_TOPK: int = Field(default=1, description="LLM 选表返回数量（建议 1-3）")

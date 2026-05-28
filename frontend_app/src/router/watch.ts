@@ -1,58 +1,43 @@
+import { ElMessage } from 'element-plus-secondary'
 import { useCache } from '@/utils/useCache'
 import { useAppearanceStoreWithOut } from '@/stores/appearance'
 import { useUserStore } from '@/stores/user'
 import { request } from '@/utils/request'
 import type { Router } from 'vue-router'
 import { uer_info_Api } from '@/api/prompt'
+
 const appearanceStore = useAppearanceStoreWithOut()
 const userStore = useUserStore()
 const { wsCache } = useCache()
+
 const whiteList = ['/login']
 const assistantWhiteList = ['/assistant', '/embeddedPage', '/401', '/chat']
 
-const autoLogin = (): Promise<void> => {
-  return new Promise((resolve) => {
-    try {
-      // 尝试使用钉钉 JSAPI 获取免登授权码
-      const dd = (window as any).dd
-      if (!dd || !dd.ready) {
-        console.log('DingTalk JSAPI not available, skipping auto login')
-        resolve()
-        return
-      }
-      console.log('env:', dd.env?.platform)
-      dd.ready(() => {
-        const codeID = import.meta.env.MODE === 'development'
-          ? 'dingc9d2820241461f3df2c783f7214b6d69'
-          : 'dingfb48100d0e532caa24f2f5cc6abecb85'
-        dd.runtime.permission
-          .requestAuthCode({ corpId: codeID })
-          .then((onSuccess: any) => {
-            console.log('DingTalk auth code success:', onSuccess)
-            return fetchData(onSuccess.code)
-          })
-          .then(() => resolve())
-          .catch((err: any) => {
-            console.error('DingTalk requestAuthCode failed:', err)
-            resolve()
-          })
+import * as dd from 'dingtalk-jsapi'
+
+const autoLogin = () => {
+  console.log('env:', dd.env.platform)
+  dd.ready(() => {
+    dd.runtime.permission
+      .requestAuthCode({
+        corpId: 'dingfb48100d0e532caa24f2f5cc6abecb85',
       })
-      dd.error?.(() => {
-        console.error('DingTalk JSAPI error')
-        resolve()
+      .then((onSuccess: any) => {
+        console.log('success: ', onSuccess)
+        fetchData(onSuccess.code)
       })
-    } catch (e) {
-      console.error('autoLogin error:', e)
-      resolve()
-    }
   })
 }
 
-const fetchData = (code: string): Promise<void> => {
-  return uer_info_Api.uerInfo(code)
+const fetchData = (code: string) => {
+  uer_info_Api
+    .uerInfo(code)
     .then((res: any) => {
       console.log(res, '返回的用户数据')
-      const { userInfo: { unionid, name, jobnumber }, accessToken } = res
+      const {
+        userInfo: { unionid, name, jobnumber },
+        accessToken,
+      } = res
       wsCache.set('user.token', accessToken)
       console.log(wsCache.get('user.token'), 'accessToken')
       console.log(name, 'name')
@@ -61,48 +46,34 @@ const fetchData = (code: string): Promise<void> => {
       userStore.setUerName(name)
       userStore.setJobnumber(jobnumber)
     })
-    .catch((err: any) => {
-      console.error('fetchData failed:', err)
-    })
+    .finally(() => {})
 }
 
-const fetchJobNumber = (code: string): Promise<void> => {
-  return uer_info_Api.jobNumber(code)
-    .then((res: any) => {
-      console.log(res, '返回的用户数据')
-      const { userInfo: { unionid, name, jobnumber }, accessToken } = res
-      wsCache.set('user.token', accessToken)
-      console.log(wsCache.get('user.token'), accessToken)
-      console.log(unionid, 'unionid')
-      userStore.setUerName(name)
-      userStore.setJobnumber(jobnumber)
-    })
-    .catch((err: any) => {
-      console.error('fetchJobNumber failed:', err)
-    })
-}
-// 标记是否正在执行无感登录（避免重复请求）
 export const watchRouter = (router: Router) => {
-
   router.beforeEach(async (to: any, from: any, next: any) => {
+    autoLogin()
+
     try {
-      if (import.meta.env.MODE === 'development') {
-        await fetchJobNumber('P638418')
-      } else {
-        await autoLogin()
-      }
       await loadXpackStatic()
+    } catch (e) {
+      console.error('loadXpackStatic failed:', e)
+    }
+
+    try {
       await appearanceStore.setAppearance()
+    } catch (e) {
+      console.error('setAppearance failed:', e)
+    }
+
+    try {
       if (typeof LicenseGenerator !== 'undefined') {
         LicenseGenerator.generateRouters(router)
       }
     } catch (e) {
-      console.error('Router guard init error:', e)
+      console.error('generateRouters failed:', e)
     }
 
     const token = wsCache.get('user.token')
-    console.log(token, 'token333')
-    console.log(to.path, from.path, 'beforeEach')
 
     if (to.path.startsWith('/login') && userStore.getUid) {
       next('/')
@@ -112,7 +83,6 @@ export const watchRouter = (router: Router) => {
       next()
       return
     }
-
     if (whiteList.includes(to.path)) {
       next()
       return
@@ -122,7 +92,11 @@ export const watchRouter = (router: Router) => {
       return
     }
     if (!userStore.getUid) {
-      await userStore.info()
+      try {
+        await userStore.info()
+      } catch (e) {
+        console.error('userStore.info failed:', e)
+      }
     }
     if (to.path === '/' || accessCrossPermission(to)) {
       next('/chat')
@@ -144,24 +118,23 @@ const accessCrossPermission = (to: any) => {
     (to.path.startsWith('/set') && !userStore.isSpaceAdmin)
   )
 }
+
 const loadXpackStatic = () => {
   if (document.getElementById('sqlbot_xpack_static')) {
     return Promise.resolve()
   }
   const url = `/xpack_static/license-generator.umd.js?t=${Date.now()}`
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     request
       .loadRemoteScript(url, 'sqlbot_xpack_static', () => {
-        const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
-        if (typeof LicenseGenerator !== 'undefined') {
-          LicenseGenerator?.init(baseUrl).then(() => resolve(true)).catch(() => resolve(true))
-        } else {
+        LicenseGenerator?.init(import.meta.env.VITE_API_BASE_URL).then(() => {
           resolve(true)
-        }
+        })
       })
       .catch((error) => {
         console.error('Failed to load xpack_static script:', error)
-        resolve(true)
+        ElMessage.error('Failed to load license generator script')
+        reject(error)
       })
   })
 }

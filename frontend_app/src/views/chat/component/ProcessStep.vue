@@ -25,8 +25,10 @@
           </el-icon>
         </div>
         <div class="step-info">
-          <div class="step-name">{{ stepName }}</div>
-          <div class="step-description" v-if="description">{{ description }}</div>
+          <div class="step-line">
+            <span class="step-name">{{ stepName }}</span>
+            <span v-if="description" class="step-description-inline">{{ description }}</span>
+          </div>
         </div>
         <div class="step-action">
           <el-icon v-if="hasResult && stepStatus === 'completed'" class="expand-icon">
@@ -77,11 +79,16 @@
           <span class="result-label">引擎类型：</span>
           <span class="result-value">{{ result.engine_type }}</span>
         </div>
+        <div v-if="result.rewritten_question" class="result-item">
+          <span class="result-label">重写问题：</span>
+          <span class="result-value">{{ result.rewritten_question }}</span>
+        </div>
+        <div v-if="result.changed !== undefined" class="result-item">
+          <span class="result-label">是否改写：</span>
+          <span class="result-value">{{ result.changed ? '是' : '否' }}</span>
+        </div>
       </div>
-      <div v-if="stepStatus === 'error' && description" class="step-error-message">
-        <div class="error-label">错误信息：</div>
-        <div class="error-content">{{ description }}</div>
-      </div>
+
     </div>
   </div>
 </template>
@@ -116,13 +123,13 @@ const toggleExpand = () => {
 
 <style scoped lang="less">
 .process-step-container {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .process-step {
   border: 1px solid #e4e7ed;
   border-radius: 6px;
-  padding: 12px;
+  padding: 8px 10px;
   background-color: #f5f5f5;
   transition: all 0.3s ease;
 
@@ -166,8 +173,8 @@ const toggleExpand = () => {
 }
 
 .step-icon {
-  margin-right: 12px;
-  font-size: 20px;
+  margin-right: 8px;
+  font-size: 16px;
 
   .step-icon-pending {
     color: #909399;
@@ -200,16 +207,29 @@ const toggleExpand = () => {
   flex: 1;
 }
 
-.step-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: #909399;
-  margin-bottom: 4px;
+.step-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-.step-description {
-  font-size: 12px;
+.step-name {
+  font-size: 13px;
+  font-weight: 500;
   color: #909399;
+  line-height: 18px;
+  flex-shrink: 0;
+}
+
+.step-description-inline {
+  font-size: 11px;
+  color: #909399;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .step-action {
@@ -307,4 +327,3 @@ const toggleExpand = () => {
   word-break: break-word;
 }
 </style>
-

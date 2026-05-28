@@ -99,6 +99,7 @@ const stepOrder = [
   'terminology-retrieval',
   'training-retrieval',
   'table-retrieval',
+  'question-rewrite',
   'sql-generation',
   'sql-execution',
   'chart-generation',
@@ -249,7 +250,12 @@ const sendMessage = async () => {
                 break
               case 'step-error':
                 // 步骤错误
-                updateStepStatus(data.step, data.step_name, 'error', data.error)
+                if (data.step === 'sql-execution') {
+                  // SQL执行失败时，步骤区只展示简短失败提示，详细报错走回答区「查看具体报错」
+                  updateStepStatus(data.step, data.step_name, 'error', 'SQL执行失败')
+                } else {
+                  updateStepStatus(data.step, data.step_name, 'error', data.error)
+                }
                 break
               case 'sql-result':
                 sql_answer += data.reasoning_content
@@ -363,9 +369,9 @@ onMounted(() => {
 })
 
 defineExpose({ sendMessage, index: () => index.value, stop })
-const ArrowDownT = ref(false)
-const ArrowDownF = () => {
-  ArrowDownT.value = !ArrowDownT.value
+const stepsExpanded = ref(true)
+const toggleSteps = () => {
+  stepsExpanded.value = !stepsExpanded.value
 }
 </script>
 
@@ -373,17 +379,15 @@ const ArrowDownF = () => {
   <BaseAnswer v-if="message" :message="message" :reasoning-name="reasoningName" :loading="_loading">
     <!-- 步骤展示区域 -->
     <div v-if="orderedSteps.length > 0" class="process-steps-container">
-      <div class="process-steps-title">
-      <span>
-        推理过程
-      </span>
-        <div @click="ArrowDownF" style="height: 22px;width: 22px;margin-left:20px;">
-          <ArrowDown v-if="!ArrowDownT"></ArrowDown>
-          <ArrowUp v-else></ArrowUp>
+      <div class="process-steps-title" @click="toggleSteps">
+        <span>推理过程</span>
+        <div class="steps-toggle-icon">
+          <ArrowUp v-if="stepsExpanded"></ArrowUp>
+          <ArrowDown v-else></ArrowDown>
         </div>
       </div>
 
-      <div v-show="ArrowDownT||orderedSteps.length!=7">
+      <div v-show="stepsExpanded">
         <ProcessStep
           v-for="step in orderedSteps"
           :key="step.step"
@@ -438,11 +442,22 @@ const ArrowDownF = () => {
 
 .process-steps-title {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
   font-size: 14px;
   font-weight: 500;
   color: #909399;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
   border-bottom: 1px solid #d3d3d3;
+}
+
+.steps-toggle-icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>

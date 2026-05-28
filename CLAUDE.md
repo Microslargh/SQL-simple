@@ -100,6 +100,29 @@ frontend/src/
 
 技术栈: Vue 3 + TypeScript + Vite + Element Plus + AntV G2/S2 + Pinia
 
+### 移动端前端 (`frontend_app/`)
+
+**特殊配置：**
+- **移动端适配**：`index.html` 配置 `viewport-fit=cover`、禁止缩放，适配移动端屏幕
+- **调试工具**：集成钉钉 H5 远程调试 `@ali/dingtalk-h5-remote-debug`，含 `eruda.js` 移动端调试
+- **路由模式**：使用 `createWebHashHistory()` 哈希模式，适合移动端打包部署
+- **Element Plus 变体**：使用 `element-plus-secondary` 分支版本
+- **部署路径**：`base: './'` 相对路径配置
+
+**开发命令：**
+```bash
+cd frontend_app
+npm install
+npm run dev              # 启动开发服务器
+npm run build            # 生产构建 (输出到 dist/)
+npm run lint             # ESLint 检查
+```
+
+**API 配置：**
+- 开发环境：`http://10.125.33.145:9038/api/v1`
+- 生产环境：`https://newmobileapp.cgnpc.com.cn/apphost/FIN/api/v1`
+- 代理配置：`/fin/cud`、`/api/v1`、`/tuling/asrc/v3/`
+
 ## 关键配置开关
 
 `common/core/config.py` 中的 `Settings` 类（环境变量文件位于 `.env`）：

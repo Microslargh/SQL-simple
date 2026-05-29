@@ -4058,8 +4058,13 @@ class LLMService:
                         rewritten_question = rewritten_question.strip()
                         if rewritten_question != original_question_before_rewrite:
                             self.chat_question.question = rewritten_question
-                            # 重写完成后不再重复执行“历史追问增强”，避免重写结果被二次改写
+                            # 重写完成后不再重复执行”历史追问增强”，避免重写结果被二次改写
                             self._question_enhanced = True
+                            # 将重写结果持久化到 ChatRecord，使下一轮对话的 extract_context
+                            # 能读取到上一轮的重写问题而非原始问题，提升多轮追问的上下文连贯性
+                            if self.record:
+                                self.record.question = rewritten_question
+                                self.session.flush()
                             self.init_messages()
                             self.init_straight_messages()
                             self.init_rewrite_messages()

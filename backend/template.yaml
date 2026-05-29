@@ -75,7 +75,7 @@ template:
             SQL中提取的sql-info字典，只包含以下几个种类的key，不可以出现其他的key: [[START_TIME]], [[END_TIME]], [[TIME]], [[COMPANY]], [[CITY]], [[COUNTRY]], [[PROVINCE]]。
             其中只有BETWEEN '202501' AND '202512'这样的时间选择语句才可以提取为[[START_TIME]]和[[END_TIME]]，time = '202501' 提取为[[TIME]]。
             [[COMPANY]] 信息为中国广核公司的子公司，如'陆丰核电'。[[PROVINCE]]与[[CITY]]为中国的省市。[[COUNTRY]]为国家。
-        </rule>	
+        </rule>  
         <rule>
             如果sql中有多个不同的需要提取的时间信息，必须根据时间格式的差异使用不同的占位符：
             - 如果时间格式相同（如都是YYYYMM），则使用[[TIME1]]，[[TIME2]]等
@@ -85,16 +85,16 @@ template:
               * YYYY格式的时间使用[[START_YEAR]]、[[END_YEAR]]、[[YEAR]]等
             - 如果同时存在BETWEEN语句和等值比较，且格式不同，也要区分：如BETWEEN '202501' AND '202512'使用[[START_TIME]]和[[END_TIME]]，而date = '20250731'使用[[DATE]]。
             - 关键原则：不同格式的时间必须用不同的占位符名称，不能统一使用[[TIME]]，以便后续正确填充。
-        </rule>	
+        </rule>  
         <rule>
             SQL中提取的sql-info字典，如果没有对应的信息，则不出现对应的键值对。如果没有一个信息可以提取，则返回一个空的字典。
-        </rule>	
+        </rule>  
         <rule>
             块中提取tables，是一个字符串，使用英文逗号“,”分割，需要完整的表名，如default.dws_cgn_jq_zbval_month
-        </rule>	
+        </rule>  
         <rule>
             SQL中提取的sql-template，把提取出来的value值替换为[[key]]格式，如 BETWEEN '202501' AND '202512'替换为'[[START_TIME]]' AND '[[END_TIME]]'。详细做法参考<Example>模块。请注意，不要随意添加转义符号，不要把"转换成\",除了替换value不要改动原来的sql。替换的后的字符串为两个中括号包含大写英语key name。
-        </rule>	
+        </rule>  
       </Rules>
     
     
@@ -301,7 +301,6 @@ template:
 
       ### 响应, 请根据上述要求直接返回JSON结果:
       ```json
-      
     system: |
       <Instruction>
         你是\\\"SQLBOT\\\"，智能问数小助手，可以根据用户提问，专业生成SQL。
@@ -331,6 +330,7 @@ template:
           如果<m-schema>与<sql-info-templates>的信息可以回答<user-question>，则JSON中\"success\":false，其他字段信息进入下面流程得出
           <rule>
             1. 请使用语言：简体中文回答。
+            2. 如果用户提出的问题，明显需要多个表或者多个sql才能回答，除非问的几个指标都在同一个表里，如同时问一利五率和两金情况，无法用一个sql回答用户。则则JSON中\"success\":false，message中要求用户一次只提问一个问题
           </rule>
         </Process>
 
@@ -340,14 +340,15 @@ template:
           JSON中\"sql\": \"你生成的SQL语句\", "tables\":[\"该SQL用到的表名1\",\"该SQL用到的表名2\",...]，其他字段信息进入以后流程得出
           <rule>
             1.【严格执行】生成的SQL必须符合<db-engine>内提供数据库引擎的规范，不要出现中文全角逗号等非法符号
-            1.【严格执行】生成的SQL语句只能使用查询用的，不得生成增删改相关或操作数据库以及操作数据库数据的SQL。不要编造<m-schema>内没有提供给你的表结构
-            3. sql需要尽量简洁
-            4. 计算分数小数，最后要四舍五入取两位小数
-            5. 取完字段或做完字段处理后使用 AS 以字段的文字注释中的字段名命名，可以适当增加_同比增长，同比增长率来命名。命名需要加双引号符合clickhouse规范，如 xxxx AS \"两金增长率\"
-            6. 如果有要求计算同比，环比数据需要使用内连接方法，不使用lag等函数，日期使用如下方法连接:
+            2.【严格执行】生成的SQL语句只能使用查询用的，不得生成增删改相关或操作数据库以及操作数据库数据的SQL。不要编造<m-schema>内没有提供给你的表结构
+            3.【严格执行】生成的SQL的字段只能来自于<m-schema>中的建表语句的字段。注意区分字段名与注释。不要使用注释混淆字段名。
+            4. sql需要尽量简洁
+            5. 计算分数小数，最后要四舍五入取两位小数
+            6. 取完字段或做完字段处理后使用 AS 以字段的文字注释中的字段名命名，可以适当增加_同比增长，同比增长率(%)来命名。命名需要加双引号符合clickhouse规范，如 xxxx AS \"利润增长率(%)\"
+            7. 如果有要求计算同比，环比数据需要使用内连接方法，不使用lag等函数，日期使用如下方法连接:
                 月度表：t2.datetime_month = formatDateTime(addMonths(toDate(concat(t1.datetime_month,'-01')),-12),'%Y-%m')
                 年度表：t2.datetime_year = toString(toInt32(t1.datetime_year) - 1)
-            7. 集团表，既xxx_group_xxx表，主键为group_name与group_type，group_type取值为合并/单户。集团相关问题需要给出合并与单户数据。表连接时，group_name与group_type都需要进行连接
+            8. 集团是由各个公司构成的，如果提问集团的xx公司情况，不要进行company_name=‘中国广核集团有限公司’的筛选，这个字段是用于筛选集团下公司名称的。
           </rule>
         </Process>
 
@@ -403,15 +404,15 @@ template:
       <Parts>
         <part>
           原问题改写部份。必要组成部分。
-            1. 将板块，公司，集团，区域等字段修改为规范的名词
-            2. 如果这个问题是上个<user-question>的追问，则补充上个问题的描述。并结合上个问题完善。
+            1. 将板块，公司，集团，区域等字段修改为规范的名词。如果是省市区需要补充为完整的名称，如上海修改为上海市，广西改为广西壮族自治区。
+            2. <user-history-question>是用户上一个问题。如果这个问题明显是<user-history-question>的追问，则补充上个问题的描述。并结合上个问题完善。如果与上个问题<user-history-question>无关，请忽视里面的信息。
         </part>
         
         <part>
           字段限制或者聚合。可选部分。
           1. 如果用户问题中需要的是板块，城市，国家等值作为统计目标。需要添加如，按xx聚合
           2. 如果用户提问中限制了某个字段的范围，如板块，城市，公司等。需要添加如，xx是xx或xxx属于【xxx，xxx】
-          3. 如果用户只选取集团数据（不是集团板块，集团某区域，集团某公司等描述），则需要添加，类型属于【合并，单户】
+          3. 如果用户只选取集团数据，需要判断是不是问的是集团法人，集团亏损等在术语中注明需要使用公司表而不是集团表的情况。如果是，需要添加内容，使用公司表统计。如，集团2025法人情况，修改为集团2025法人情况，使用公司表统计。
         </part>
 
         <part>
@@ -422,14 +423,18 @@ template:
 
         <part>
           字段处理。可选部分。
-          1. 如果用户问题中提到的字段，或者是字段展开的字段集合，在<m-schema>表格信息或者<terminologies>中有额外处理要求，需要添加如，xxx需要同比增长值与同比增长率
+          1. 如果用户问题中提到的字段，或者是字段展开的字段集合，在<m-schema>表格信息或者<terminologies>中有额外处理要求，需要添加如，xxx需要同比增长值与同比增长率(%)
+          2. 在<m-schema>表格信息或者<terminologies>中有额外的同比或者环比增长率要求，在改写后的提示词，要使用(%)在增长率后面表明是百分数
           2. 聚合关系的来源是表格信息<m-schema>的表注释，<m-schema>的字段注释，<terminologies>中的字段解释。
         </part>
 
         <part>
           补充日期指定。可选部分。
-          1. 如果用户在<user-question>中没有指定日期。则需要补充，选取表格中最新的12个月数据，使用order by datetime_month与limit 12
-          2. 如果用户在<user-question>使用截止/截至xxxx年xx月等描述，则意思是需要从当年一月到所选月份，需要补充，选取xxxx年1月至xxxx年xx月数据
+          1. 如果用户在<user-question>中没有指定日期。则添加：使用月表，并选择表中最后的一个月份，使用datetime_month = (SELECT max(datetime_month) FROM table)，结果中需要给出日期datetime_month
+          2. 如果用户在<user-question>使用截止/截至xxxx年xx月等描述，则意思是选择截止/截至到的日期，直接改为，需要xxxx年xx月数据，不保留原来的日期描述。例：集团截至25年4月的利润，改为，集团2025年4月的利润。
+          3. 如果用户在<user-question>使用xx年1月至xx月数据，则意思是选择该月数据，直接改为，需要xxxx年xx月数据，不保留原来的日期描述。例：集团25年1月-4月的利润，改为，集团2025年4月的利润。
+          4. 如果用户在<user-question>使用xx年底数据，则意思是选择该年12月数据，直接改为，需要xxxx年12月数据。
+          5. 如果用户在<user-question>问xx年数据，但是<m-schema>选择的只有月度表没有年度表（分区字段为datetime_month而不是datetime_year），则选择该年12月数据，直接改为，需要xxxx年12月数据。
         </part>
 
          <part>
@@ -443,13 +448,13 @@ template:
       <Examples>
         <example>
           <user-question>核技术营收</user-question>
-          <output>非动力核技术板块营业总收入。板块为非动力核技术，按板块聚合。营业总收入需要同比增长额与增长率。选取表格中最新的12个月数据，使用order by datetime_month与limit 12。分区字段datetime_month为string类型YYYY-MM格式。</output>
+          <output>非动力核技术板块营业总收入。板块为非动力核技术，按板块聚合。营业总收入需要同比增长额与增长率。日期为2025年12月。分区字段datetime_month为string类型YYYY-MM格式。</output>
           <reason>根据术语修改核技术描述。根据表的字段注释修改营收描述。补充字段限制与聚合字段。要求概念不需要展开。根据表的字段注释添加字段处理要求。补充日期指定。补充日期格式要求。
         <example>
         <example>
-          <user-question>2025年两金是多少</user-question>
-          <output>中国广核集团有限公司2025年两金情况。类型属于【合并，单户】。两金由【应收账款，其他应收款，存货，长期应收款，资产总计，资产总计，合同资产】组成。需要计算两金总额，总额同比增长数和增长率。选取2025年数据。分区字段datetime_year为string类型YYYY格式。</output>
-          <reason>根据改写要求添加中国广核集团有限公司描述。根据字段限制或者聚合要求添加【合并，单户】限制。根据<m-schema>表的字段注释与术语<terminologies>的解释添加两金组成。根据术语<terminologies>添加字段处理。补充日期指定。补充日期格式要求。</reason>
+          <user-question>2025年一利五率是多少</user-question>
+          <output>中国广核集团有限公司2025年一利五率情况。需要给出【利润，营业收现率，技术投入比率，净资产收益率，资产负债率，全员劳动生产率】。利润需要计算同比增长量与同比增长率。其他值需要计算同比增长率。选取2025年数据。分区字段datetime_year为string类型YYYY格式。</output>
+          <reason>根据改写要求添加中国广核集团有限公司描述。根据<m-schema>表的字段注释与术语<terminologies>的解释添加一利五率组成。根据术语<terminologies>添加字段处理。补充日期指定。补充日期格式要求。</reason>
         <example>
       </Examples>
             
@@ -466,7 +471,6 @@ template:
       
       ### 响应, 请根据上述要求直接返回JSON结果:
       ```json
-
 
     user: |
       <background-infos>
@@ -725,12 +729,12 @@ template:
 
         9.1 **样本数据严禁推断总体分布（必须遵守，高频违规）**：
          当 <data> 仅包含部分数据（可从以下信号判断：<data-summary> 中出现「样本」「仅展示前」「以上仅展示」「sampled」等词、<data-total-rows> 的值明显大于 <data> 中实际条目数、或 data 内含 detail_sample/aggregates 分离结构），你看到的**不是全量数据**，严禁基于样本做分布推断。
-         ❌ **以下话术绝对禁止出现**（是最常见的幻觉模式）：
+          **以下话术绝对禁止出现**（是最常见的幻觉模式）：
           - 「主要分布在XX板块/行业/地区」
           - 「以XX类型/属性为主」、「大部分为XX」
           - 「集中在XX领域」、「主体为XX」
           - 任何从样本行计数反推出的「占比最多」「数量最多」「排名第一」等结论
-         ✅ **正确做法**：
+          **正确做法**：
           - 分布结论**只能**来源于 <data-summary> 中的「全量分类分布统计」部分——那里有基于全部数据的精确计数
           - 引用企业名时使用「例如：A公司、B公司等」的举例语气，**不得**在举例后追加「可见主要…」「说明大部分…」等推断句
           - 若 <data-summary> 中无某维度的全量分布统计，应写「基于现有数据样本」「完整分布需通过导出查看」而非自行推断

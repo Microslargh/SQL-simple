@@ -127,10 +127,10 @@ class LLMService:
     record: ChatRecord
     config: LLMConfig
     llm: BaseChatModel
-    sql_message: List[Union[BaseMessage, dict[str, Any]]] = []
-    straight_messages: List[Union[BaseMessage, dict[str, Any]]] = []
-    rewrite_messages: List[Union[BaseMessage, dict[str, Any]]] = []
-    chart_message: List[Union[BaseMessage, dict[str, Any]]] = []
+    sql_message: List[Union[BaseMessage, dict[str, Any]]]
+    straight_messages: List[Union[BaseMessage, dict[str, Any]]]
+    rewrite_messages: List[Union[BaseMessage, dict[str, Any]]]
+    chart_message: List[Union[BaseMessage, dict[str, Any]]]
 
     session: Session
     current_user: CurrentUser
@@ -157,6 +157,10 @@ class LLMService:
         self.chunk_list = []
         self.trace_group = uuid4().hex
         self._pipeline_trace = None
+        self.sql_message = []
+        self.straight_messages = []
+        self.rewrite_messages = []
+        self.chart_message = []
         # 必须使用“每个 LLMService 实例独立 Session”，避免并发请求共享同一个 Session 导致事务互相污染。
         self.session = session_maker()
         self.session.exec = self.session.exec if hasattr(self.session, "exec") else self.session.execute
@@ -742,21 +746,14 @@ class LLMService:
                     "请只返回1个最相关表名。"
                     + terminology_snippet
                 )
-                enforce_msg = self.llm.invoke([
-                    SystemMessage(content=enforce_system),
-                    HumanMessage(content=enforce_user),
-                ])
-                enforce_raw = self._extract_message_text(enforce_msg)
-                if not enforce_raw:
-                    _async_log_util.info("[LLM选表] force_pick_one 调用模型（structured）")
-                    enforce_raw = self._invoke_openai_compatible_raw(
-                        messages=[
-                            {"role": "system", "content": enforce_system},
-                            {"role": "user", "content": enforce_user},
-                        ],
-                        response_format=self._table_selector_response_format(),
-                        timeout_sec=12,
-                    )
+                enforce_raw = self._invoke_openai_compatible_raw(
+                    messages=[
+                        {"role": "system", "content": enforce_system},
+                        {"role": "user", "content": enforce_user},
+                    ],
+                    response_format=self._table_selector_response_format(),
+                    timeout_sec=12,
+                )
                 if enforce_raw:
                     try:
                         enforce_json = extract_nested_json(enforce_raw) or enforce_raw
@@ -939,7 +936,8 @@ class LLMService:
         )
         user_prompt = (
             f"数据库引擎：{self.chat_question.engine}\n"
-            f"错误信息：{error_msg}\n"
+            f"错误类型：{error_type}。修复目标：{fix_hint}。\n"
+            f"错误详情(已截断)：{error_msg[:300]}\n"
             f"原始回答：\n{raw_answer}\n"
         )
         msgs = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
@@ -1374,6 +1372,25 @@ class LLMService:
                     fields.append(column_str)
         return fields
 
+    def get_fields_from_sql_result(self):
+        """从SQL执行结果中提取字段名列表（兜底：图表配置为空或获取失败时使用）。"""
+        try:
+            data = get_chat_chart_data(self.session, self.record.id, self.current_user)
+            if isinstance(data, dict):
+                raw_fields = data.get('fields') or []
+                if raw_fields:
+                    return [str(f) for f in raw_fields]
+            # 直接从 record.data 兜底解析
+            if self.record and self.record.data:
+                parsed = orjson.loads(self.record.data) if isinstance(self.record.data, str) else self.record.data
+                if isinstance(parsed, dict):
+                    raw_fields = parsed.get('fields') or []
+                    if raw_fields:
+                        return [str(f) for f in raw_fields]
+        except Exception:
+            pass
+        return []
+
     @staticmethod
     def generate_sql_template_from_data_training(self):
 
@@ -1577,8 +1594,16 @@ class LLMService:
             _async_log_util.info(f"[数据分析] data_summary 已截断至 {ANALYSIS_SUMMARY_MAX_CHARS} 字符")
         ANALYSIS_DATA_MAX_CHARS = 60000
         if self.chat_question.data and len(self.chat_question.data) > ANALYSIS_DATA_MAX_CHARS:
-            self.chat_question.data = self.chat_question.data[:ANALYSIS_DATA_MAX_CHARS]
-            _async_log_util.warning(f"[数据分析] data JSON 已截断至 {ANALYSIS_DATA_MAX_CHARS} 字符")
+            # 在数组边界处截断，避免盲切破坏 JSON 结构
+            truncated = self.chat_question.data[:ANALYSIS_DATA_MAX_CHARS]
+            last_rbracket = truncated.rfind("]")
+            last_rbrace = truncated.rfind("}")
+            if last_rbracket > 0 and last_rbracket > last_rbrace:
+                truncated = truncated[:last_rbracket + 1]
+            elif last_rbrace > 0:
+                truncated = truncated[:last_rbrace + 1]
+            self.chat_question.data = truncated
+            _async_log_util.warning(f"[数据分析] data JSON 已截断至 {len(truncated)} 字符 (原 {len(self.chat_question.data)} 字符)")
 
         _async_log_util.info(
             f"[数据分析] 输入规模: question={len(self.chat_question.question or '')}, "
@@ -2643,8 +2668,6 @@ class LLMService:
 
     @staticmethod
     def generate_straight_sql(training_data, straight_dict_text, user_question: str = ""):
-        import re
-        import json  # 在函数开头导入 json，避免作用域问题
         if settings.LOG_LEVEL == "DEBUG":
             _async_log_util.info("="*20 +" generate_straight_sql " + "="*20 + "\n")
             # _async_log_util.info(f"training_data: {training_data}")
@@ -2840,14 +2863,7 @@ class LLMService:
                     # 检查最后几个字符是否看起来像截断的值
                     last_chars = sql_trimmed[-20:]
                     if "'" in last_chars or '"' in last_chars:
-                        # 检查是否以不完整的引号结尾（比如 '... = '[202508'）
-                        if (sql_trimmed.endswith("'") and not sql_trimmed.endswith("';") and 
-                            not sql_trimmed.endswith("'") and sql_trimmed.count("'") > 1):
-                            # 可能是截断，记录警告但继续处理
-                            _async_log_util.warning(f"SQL may have unclosed quotes: {last_chars}")
-                        elif (sql_trimmed.endswith('"') and not sql_trimmed.endswith('";') and 
-                              not sql_trimmed.endswith('"') and sql_trimmed.count('"') > 1):
-                            _async_log_util.warning(f"SQL may have unclosed quotes: {last_chars}")
+                        _async_log_util.warning(f"SQL may have unclosed quotes (odd quote count, last 20 chars: {last_chars})")
                 
                 # 2. 检查是否包含基本的 SQL 关键字（验证 SQL 是否完整）
                 sql_upper = sql_trimmed.upper()

@@ -581,8 +581,12 @@ def select_terminology_by_word(session: SessionDep, word: str, oid: int, datasou
     for row in t_list:
         pid = str(row.pid) if row.pid is not None else str(row.id)
         if _map.get(pid) is None:
-            _map[pid] = {'words': [], 'description': row.description}
+            _map[pid] = {'words': [], 'description': None}
         _map[pid]['words'].append(row.word)
+        # description 仅在父节点上存储；若子节点先返回则 description 为 None，
+        # 必须用非空值覆盖，避免 XML 输出 <description/>
+        if row.description:
+            _map[pid]['description'] = row.description
 
     _results: list[dict] = []
     for key in _map.keys():

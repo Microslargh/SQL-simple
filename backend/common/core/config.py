@@ -130,7 +130,7 @@ class Settings(BaseSettings):
     TABLE_EMBEDDING_COUNT: int = Field(default=10, description="表embedding检索返回的最大表数量")
     # 上下文仲裁者（多轮对话意图冲突检测，解决「子集过滤」与「全量分布」冲突）
     CONTEXT_ARBITRATOR_API_URL: str = Field(
-        default="http://10.100.110.113:8000/v1",
+        default="",
         description="语义仲裁者 API 地址（OpenAI 兼容格式），留空则禁用仲裁",
     )
     CONTEXT_ARBITRATOR_MODEL: str = Field(default="Qwen3.5-9B", description="仲裁者模型名称")

@@ -331,6 +331,8 @@ export const chatApi = {
   recommendQuestions: (record_id: number | undefined, controller?: AbortController) => {
     return request.fetchStream(`/chat/recommend_questions/${record_id}`, {}, controller)
   },
+  feedback: (recordId: number, isLike: boolean, reason?: string) =>
+    request.post('/chat/feedback', { record_id: recordId, is_like: isLike, reason }),
   checkLLMModel: () => request.get('/system/aimodel/default', { requestOptions: { silent: true } }),
   export2Excel: (data: any) =>
     request.post('/chat/excel/export', data, {

@@ -17,10 +17,16 @@ const showBlock = computed(() => {
 })
 
 const errorMessage = computed(() => {
-  const obj = { message: props.error, showMore: false, traceback: '', type: undefined }
-  if (showBlock.value && props.error?.trim().startsWith('{') && props.error?.trim().endsWith('}')) {
+  const obj: {
+    message: string | undefined
+    showMore: boolean
+    traceback: string
+    type: string | undefined
+  } = { message: props.error, showMore: false, traceback: '', type: undefined }
+  const raw = props.error?.trim() || ''
+  if (showBlock.value && raw.startsWith('{') && raw.endsWith('}')) {
     try {
-      const json = JSON.parse(props.error?.trim())
+      const json = JSON.parse(raw)
       obj.message = json['message']
       obj.traceback = json['traceback']
       obj.type = json['type']
@@ -30,6 +36,12 @@ const errorMessage = computed(() => {
     } catch (e) {
       console.error(e)
     }
+  } else if (showBlock.value && raw.includes('Traceback (most recent call last)')) {
+    // 兜底：兼容历史/异常分支直接回传纯文本 traceback 的情况
+    obj.message = 'Execute SQL Failed'
+    obj.traceback = raw
+    obj.type = 'exec-sql-err'
+    obj.showMore = true
   }
   return obj
 })
@@ -53,13 +65,15 @@ function showTraceBack() {
         {{ t('chat.ds_is_invalid') }}
       </template>
       <template v-else-if="errorMessage.type === 'exec-sql-err'">
-        {{ t('chat.exec-sql-err') }}
+        SQL生成出错无法执行，
       </template>
       <template v-else>
         {{ t('chat.error') }}
       </template>
       <el-button v-if="errorMessage.showMore" text @click="showTraceBack">
-        {{ t('chat.show_error_detail') }}
+        <span class="error-link">
+          {{ errorMessage.type === 'exec-sql-err' ? '查看具体报错' : t('chat.show_error_detail') }}
+        </span>
       </el-button>
     </div>
 
@@ -99,5 +113,10 @@ function showTraceBack() {
     font-size: 14px;
     line-height: 20px;
   }
+}
+
+.error-link {
+  color: #18a058;
+  text-decoration: underline;
 }
 </style>

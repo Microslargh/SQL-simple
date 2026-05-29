@@ -296,6 +296,11 @@
                       </ChatToolBar>
                     </template>
                     <template #footer>
+                      <FeedbackBlock
+                        v-if="message?.record?.finish && message?.record?.id"
+                        :record-id="message.record.id"
+                        :disabled="isTyping"
+                      />
                       <RecommendQuestion
                         ref="recommendQuestionRef"
                         :current-chat="currentChat"
@@ -456,6 +461,7 @@ import AnalysisAnswer from './answer/AnalysisAnswer.vue'
 import PredictAnswer from './answer/PredictAnswer.vue'
 import UserChat from './chat-block/UserChat.vue'
 import RecommendQuestion from './RecommendQuestion.vue'
+import FeedbackBlock from './component/FeedbackBlock.vue'
 import ChatListContainer from './ChatListContainer.vue'
 import ChatCreator from '@/views/chat/ChatCreator.vue'
 import ErrorInfo from './ErrorInfo.vue'

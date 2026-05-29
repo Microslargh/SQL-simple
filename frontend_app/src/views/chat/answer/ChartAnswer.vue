@@ -229,7 +229,20 @@ const sendMessage = async () => {
                 })
                 break
               case 'error':
-                currentRecord.error = data.content
+                {
+                  const raw = String(data.content || '')
+                  // 兜底：若后端返回纯文本 traceback，前端统一包装为 exec-sql-err 结构，
+                  // 以保证回答区固定显示「SQL生成出错无法执行（查看具体报错）」并弹窗查看详情。
+                  if (raw.includes('Traceback (most recent call last)')) {
+                    currentRecord.error = JSON.stringify({
+                      message: 'Execute SQL Failed',
+                      traceback: raw,
+                      type: 'exec-sql-err',
+                    })
+                  } else {
+                    currentRecord.error = raw
+                  }
+                }
                 emits('error')
                 break
               case 'step-start':
@@ -280,6 +293,7 @@ const sendMessage = async () => {
                 // 分析完成，但继续等待图表
                 break
               case 'finish':
+                currentRecord.finish = true
                 emits('finish', currentRecord.id)
                 break
             }

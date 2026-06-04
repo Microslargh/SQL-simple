@@ -3,7 +3,7 @@ from typing import List
 
 from sqlalchemy.orm import sessionmaker, scoped_session
 
-executor = ThreadPoolExecutor(max_workers=200)
+executor = ThreadPoolExecutor(max_workers=50)
 
 from common.core.db import engine
 

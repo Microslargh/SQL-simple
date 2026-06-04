@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import sqlbot_xpack
@@ -37,9 +38,11 @@ def init_data_training_embedding_data():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    run_migrations()
-    init_sqlbot_cache()
-    init_dynamic_cors(app)
+    from apps.chat.task.llm import set_main_event_loop
+    set_main_event_loop(asyncio.get_running_loop())
+    await asyncio.to_thread(run_migrations)
+    await asyncio.to_thread(init_sqlbot_cache)
+    await asyncio.to_thread(init_dynamic_cors, app)
     init_terminology_embedding_data()
     init_data_training_embedding_data()
     SQLBotLogUtil.info("✅ SQLBot 初始化完成")

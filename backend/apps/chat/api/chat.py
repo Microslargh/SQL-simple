@@ -18,7 +18,7 @@ from apps.chat.curd.chat import list_chats, get_chat_with_records, create_chat, 
     create_error_query_record, list_execution_traces
 from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, ExcelData, \
     BatchDeleteChatRequest
-from apps.chat.task.llm import LLMService
+from apps.chat.task.llm import LLMService, _acquire_semaphore
 from common.core.deps import CurrentAssistant, SessionDep, CurrentUser, Trans
 
 
@@ -159,10 +159,12 @@ async def recommend_questions(session: SessionDep, current_user: CurrentUser, ch
     if not settings.GUESS_RECOMMEND_ENABLED:
         return StreamingResponse(_return_empty(), media_type="text/event-stream")
 
+    sem = await _acquire_semaphore()
     try:
         record = get_chat_record_by_id(session, chat_record_id, current_user)
 
         if not record:
+            sem.release()
             return StreamingResponse(_return_empty(), media_type="text/event-stream")
 
         request_question = ChatQuestion(chat_id=record.chat_id, question=record.question if record.question else '')
@@ -171,6 +173,7 @@ async def recommend_questions(session: SessionDep, current_user: CurrentUser, ch
         llm_service.set_record(record)
         llm_service.run_recommend_questions_task_async()
     except Exception as e:
+        sem.release()
         SQLBotLogUtil.error("Recommend questions task failed", exc_info=True)
 
         def _err(_e: Exception):
@@ -179,28 +182,37 @@ async def recommend_questions(session: SessionDep, current_user: CurrentUser, ch
 
         return StreamingResponse(_err(e), media_type="text/event-stream")
 
-    return StreamingResponse(llm_service.await_result(), media_type="text/event-stream")
+    async def _stream():
+        try:
+            async for chunk in llm_service.await_result():
+                yield chunk
+        finally:
+            sem.release()
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 @router.post("/question")
 async def stream_sql(session: SessionDep, current_user: CurrentUser, request_question: ChatQuestion,
                      current_assistant: CurrentAssistant):
     """Stream SQL analysis results
-    
+
     Args:
         session: Database session
         current_user: CurrentUser
         request_question: User question model
-        
+
     Returns:
         Streaming response with analysis results
     """
 
+    sem = await _acquire_semaphore()
     try:
         llm_service = await LLMService.create(current_user, request_question, current_assistant, embedding=True)
         llm_service.init_record()
         llm_service.run_task_async()
     except Exception as e:
+        sem.release()
         SQLBotLogUtil.error("LLM stream task failed", exc_info=True)
 
         def _err(_e: Exception):
@@ -209,12 +221,20 @@ async def stream_sql(session: SessionDep, current_user: CurrentUser, request_que
 
         return StreamingResponse(_err(e), media_type="text/event-stream")
 
-    return StreamingResponse(llm_service.await_result(), media_type="text/event-stream")
+    async def _stream():
+        try:
+            async for chunk in llm_service.await_result():
+                yield chunk
+        finally:
+            sem.release()
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 @router.post("/record/{chat_record_id}/{action_type}")
 async def analysis_or_predict(session: SessionDep, current_user: CurrentUser, chat_record_id: int, action_type: str,
                               current_assistant: CurrentAssistant):
+    sem = await _acquire_semaphore()
     try:
         if action_type != 'analysis' and action_type != 'predict':
             raise Exception(f"Type {action_type} Not Found")
@@ -243,6 +263,7 @@ async def analysis_or_predict(session: SessionDep, current_user: CurrentUser, ch
         llm_service = await LLMService.create(current_user, request_question, current_assistant)
         llm_service.run_analysis_or_predict_task_async(action_type, record)
     except Exception as e:
+        sem.release()
         SQLBotLogUtil.error("LLM analysis/predict task failed", exc_info=True)
 
         def _err(_e: Exception):
@@ -251,7 +272,14 @@ async def analysis_or_predict(session: SessionDep, current_user: CurrentUser, ch
 
         return StreamingResponse(_err(e), media_type="text/event-stream")
 
-    return StreamingResponse(llm_service.await_result(), media_type="text/event-stream")
+    async def _stream():
+        try:
+            async for chunk in llm_service.await_result():
+                yield chunk
+        finally:
+            sem.release()
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 @router.post("/excel/export")

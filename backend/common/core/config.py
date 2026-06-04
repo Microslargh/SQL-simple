@@ -160,6 +160,10 @@ class Settings(BaseSettings):
     ANALYSIS_REFLECTION_MODEL: str = Field(default="Qwen3.5-9B", description="分析反思修正使用的模型名称")
     ANALYSIS_REFLECTION_TIMEOUT: float = Field(default=10.0, description="分析反思修正调用超时秒数")
 
+    # 并发控制
+    LLM_MAX_CONCURRENT: int = Field(default=100, description="最大并发 LLM 问数管线数（超出排队等待）")
+    LLM_PIPELINE_TIMEOUT: int = Field(default=300, description="单条 LLM 问数管线超时秒数（0=不限）")
+
     GUESS_SCHEMA_TABLE_COUNT: int = Field(default=5, description="猜你想问场景 schema pruning 返回表数量（建议 3-5）")
     GUESS_SCHEMA_INCLUDE_VALUE_HINTS: bool = Field(default=True, description="猜你想问 schema 是否注入深表字段值域示例")
     GUESS_SCHEMA_VALUE_HINT_TOPK: int = Field(default=5, description="深表字段值域示例最多注入值数量")

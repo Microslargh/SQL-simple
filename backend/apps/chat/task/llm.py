@@ -1,7 +1,9 @@
+import asyncio
 import concurrent
 import json
 import os
 import re
+import time
 import traceback
 import urllib.parse
 import warnings
@@ -88,7 +90,38 @@ def _estimate_tokens(messages: list) -> int:
             total_chars += sum(len(part.get('text', '')) if isinstance(part, dict) else 0 for part in content)
     return total_chars // 2  # conservative: 2 chars per token
 
-executor = ThreadPoolExecutor(max_workers=200)
+executor = ThreadPoolExecutor(max_workers=100)
+
+_DONE = object()
+_main_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+def set_main_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _main_event_loop
+    _main_event_loop = loop
+
+
+def _get_main_event_loop() -> asyncio.AbstractEventLoop:
+    if _main_event_loop is None:
+        return asyncio.get_running_loop()
+    return _main_event_loop
+
+
+_llm_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(settings.LLM_MAX_CONCURRENT)
+    return _llm_semaphore
+
+
+async def _acquire_semaphore() -> asyncio.Semaphore:
+    sem = _get_llm_semaphore()
+    await sem.acquire()
+    return sem
+
 
 dynamic_ds_types = [1, 3]
 dynamic_subsql_prefix = 'select * from sqlbot_dynamic_temp_table_'
@@ -155,6 +188,9 @@ class LLMService:
                  current_assistant: "CurrentAssistant | None" = None, no_reasoning: bool = False,
                  embedding: bool = False, config: LLMConfig = None):
         self.chunk_list = []
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._started_at: float | None = None
+        self._pipeline_timeout: float = settings.LLM_PIPELINE_TIMEOUT
         self.trace_group = uuid4().hex
         self._pipeline_trace = None
         self.sql_message = []
@@ -252,12 +288,8 @@ class LLMService:
 
     def is_running(self, timeout=0.5):
         try:
-            r = concurrent.futures.wait([self.future], timeout)
-            if len(r.not_done) > 0:
-                return True
-            else:
-                return False
-        except Exception as e:
+            return not self.future.done()
+        except Exception:
             return True
 
     def _enhance_question_by_llm(self, current_question: str, history_question: str) -> Optional[str]:
@@ -3519,30 +3551,42 @@ class LLMService:
         except IndexError as e:
             return None
 
-    def await_result(self):
-        while self.is_running():
-            while True:
-                chunk = self.pop_chunk()
-                if chunk is not None:
-                    yield chunk
-                else:
-                    break
+    async def await_result(self):
         while True:
-            chunk = self.pop_chunk()
-            if chunk is None:
-                break
-            yield chunk
+            try:
+                chunk = await asyncio.wait_for(self._queue.get(), timeout=0.3)
+                if chunk is _DONE:
+                    return
+                yield chunk
+            except asyncio.TimeoutError:
+                if self._pipeline_timeout > 0 and self._started_at is not None:
+                    if time.monotonic() - self._started_at > self._pipeline_timeout:
+                        yield 'data:' + orjson.dumps({
+                            'content': '请求处理超时，请稍后重试', 'type': 'error'
+                        }).decode() + '\n\n'
+                        return
+                if not self.is_running():
+                    while not self._queue.empty():
+                        chunk = self._queue.get_nowait()
+                        if chunk is _DONE:
+                            return
+                        yield chunk
+                    return
 
     def run_task_async(self, in_chat: bool = True, stream: bool = True,
                        finish_step: ChatFinishStep = ChatFinishStep.GENERATE_CHART):
         if in_chat:
             stream = True
+        self._started_at = time.monotonic()
         self.future = executor.submit(self.run_task_cache, in_chat, stream, finish_step)
 
     def run_task_cache(self, in_chat: bool = True, stream: bool = True,
                        finish_step: ChatFinishStep = ChatFinishStep.GENERATE_CHART):
+        loop = _get_main_event_loop()
         for chunk in self.run_task(in_chat, stream, finish_step):
+            asyncio.run_coroutine_threadsafe(self._queue.put(chunk), loop)
             self.chunk_list.append(chunk)
+        asyncio.run_coroutine_threadsafe(self._queue.put(_DONE), loop)
 
     def run_task(self, in_chat: bool = True, stream: bool = True,
                  finish_step: ChatFinishStep = ChatFinishStep.GENERATE_CHART):
@@ -4555,11 +4599,15 @@ class LLMService:
             self._close_session_safely()
 
     def run_recommend_questions_task_async(self):
+        self._started_at = time.monotonic()
         self.future = executor.submit(self.run_recommend_questions_task_cache)
 
     def run_recommend_questions_task_cache(self):
+        loop = _get_main_event_loop()
         for chunk in self.run_recommend_questions_task():
+            asyncio.run_coroutine_threadsafe(self._queue.put(chunk), loop)
             self.chunk_list.append(chunk)
+        asyncio.run_coroutine_threadsafe(self._queue.put(_DONE), loop)
 
     def run_recommend_questions_task(self):
         res = self.generate_recommend_questions_task()
@@ -4575,11 +4623,15 @@ class LLMService:
 
     def run_analysis_or_predict_task_async(self, action_type: str, base_record: ChatRecord):
         self.set_record(save_analysis_predict_record(self.session, base_record, action_type))
+        self._started_at = time.monotonic()
         self.future = executor.submit(self.run_analysis_or_predict_task_cache, action_type)
 
     def run_analysis_or_predict_task_cache(self, action_type: str):
+        loop = _get_main_event_loop()
         for chunk in self.run_analysis_or_predict_task(action_type):
+            asyncio.run_coroutine_threadsafe(self._queue.put(chunk), loop)
             self.chunk_list.append(chunk)
+        asyncio.run_coroutine_threadsafe(self._queue.put(_DONE), loop)
 
     def run_analysis_or_predict_task(self, action_type: str):
         try:

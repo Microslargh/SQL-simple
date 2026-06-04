@@ -14,7 +14,7 @@ from common.utils.utils import SQLBotLogUtil
 from apps.chat.api.chat import create_chat
 from apps.chat.models.chat_model import ChatMcp, CreateChat, ChatStart, McpQuestion, McpAssistant, ChatQuestion, \
     ChatFinishStep
-from apps.chat.task.llm import LLMService
+from apps.chat.task.llm import LLMService, _acquire_semaphore
 from apps.system.crud.user import authenticate, get_user_info
 from apps.system.schemas.system_schema import BaseUserDTO, AssistantHeader
 from common.core import security
@@ -93,11 +93,13 @@ async def mcp_question(session: SessionDep, chat: McpQuestion):
 
     mcp_chat = ChatMcp(token=chat.token, chat_id=chat.chat_id, question=chat.question)
 
+    sem = await _acquire_semaphore()
     try:
         llm_service = await LLMService.create(session_user, mcp_chat)
         llm_service.init_record()
         llm_service.run_task_async(False, chat.stream)
     except Exception as e:
+        sem.release()
         SQLBotLogUtil.error("MCP chat task failed", exc_info=True)
 
         if chat.stream:
@@ -111,21 +113,32 @@ async def mcp_question(session: SessionDep, chat: McpQuestion):
                 status_code=500,
             )
     if chat.stream:
-        return StreamingResponse(llm_service.await_result(), media_type="text/event-stream")
-    else:
-        res = llm_service.await_result()
-        raw_data = {}
-        for chunk in res:
-            if chunk:
-                raw_data = chunk
-        status_code = 200
-        if not raw_data.get('success'):
-            status_code = 500
 
-        return JSONResponse(
-            content=raw_data,
-            status_code=status_code,
-        )
+        async def _stream():
+            try:
+                async for chunk in llm_service.await_result():
+                    yield chunk
+            finally:
+                sem.release()
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+    else:
+        try:
+            res = llm_service.await_result()
+            raw_data = {}
+            async for chunk in res:
+                if chunk:
+                    raw_data = chunk
+            status_code = 200
+            if not raw_data.get('success'):
+                status_code = 500
+
+            return JSONResponse(
+                content=raw_data,
+                status_code=status_code,
+            )
+        finally:
+            sem.release()
 
 
 @router.post("/mcp_assistant", operation_id="mcp_assistant")
@@ -146,11 +159,13 @@ async def mcp_assistant(session: SessionDep, chat: McpAssistant):
     # assistant question
     mcp_chat = ChatQuestion(chat_id=c.id, question=chat.question)
     # ask
+    sem = await _acquire_semaphore()
     try:
         llm_service = await LLMService.create(session_user, mcp_chat, mcp_assistant_header)
         llm_service.init_record()
         llm_service.run_task_async(False, chat.stream, ChatFinishStep.QUERY_DATA)
     except Exception as e:
+        sem.release()
         SQLBotLogUtil.error("MCP query data task failed", exc_info=True)
 
         if chat.stream:
@@ -164,18 +179,29 @@ async def mcp_assistant(session: SessionDep, chat: McpAssistant):
                 status_code=500,
             )
     if chat.stream:
-        return StreamingResponse(llm_service.await_result(), media_type="text/event-stream")
-    else:
-        res = llm_service.await_result()
-        raw_data = {}
-        for chunk in res:
-            if chunk:
-                raw_data = chunk
-        status_code = 200
-        if not raw_data.get('success'):
-            status_code = 500
 
-        return JSONResponse(
-            content=raw_data,
-            status_code=status_code,
-        )
+        async def _stream():
+            try:
+                async for chunk in llm_service.await_result():
+                    yield chunk
+            finally:
+                sem.release()
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+    else:
+        try:
+            res = llm_service.await_result()
+            raw_data = {}
+            async for chunk in res:
+                if chunk:
+                    raw_data = chunk
+            status_code = 200
+            if not raw_data.get('success'):
+                status_code = 500
+
+            return JSONResponse(
+                content=raw_data,
+                status_code=status_code,
+            )
+        finally:
+            sem.release()
